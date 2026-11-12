@@ -9,11 +9,13 @@ export const LANGS: { key: Lang; label: string }[] = [
 export const LANG_KEY = "gpu-king-lang";
 /** 旧语言键（gpu-tycoon 时代）：新键读不到时回退读取 */
 const LEGACY_LANG_KEY = "gpu-tycoon-lang";
+/** SSR 与客户端首帧的默认语言：保证首屏文本一致，挂载后再换成存储值 */
+export const DEFAULT_LANG: Lang = "en";
 
 export function loadLang(): Lang {
-  if (typeof window === "undefined") return "en";
+  if (typeof window === "undefined") return DEFAULT_LANG;
   const saved = localStorage.getItem(LANG_KEY) ?? localStorage.getItem(LEGACY_LANG_KEY);
-  return saved === "zh-Hant" ? "zh-Hant" : "en";
+  return saved === "zh-Hant" ? "zh-Hant" : DEFAULT_LANG;
 }
 
 type Dict = Record<string, string>;
@@ -96,6 +98,7 @@ const zh: Dict = {
   "shop.topup.fx": "1 USD ≈ {rate} {cur}",
   "shop.topup.fxMeta": "匯率 {date} · 來源 {source}",
   "shop.topup.fxOffline": "離線匯率（備用值）",
+  "shop.topup.fxFallbackMeta": "離線兜底值 · 非實時匯率 · 來源 {source}",
   "shop.topup.cost": "應付 {usd} USD",
   "shop.topup.confirm": "確認充值",
   "shop.topup.cancel": "取消",
@@ -278,6 +281,7 @@ const en: Dict = {
   "shop.topup.fx": "1 USD ≈ {rate} {cur}",
   "shop.topup.fxMeta": "Rate {date} · source {source}",
   "shop.topup.fxOffline": "Offline rate (fallback)",
+  "shop.topup.fxFallbackMeta": "Offline fallback · not a live rate · source {source}",
   "shop.topup.cost": "Due {usd} USD",
   "shop.topup.confirm": "Confirm top-up",
   "shop.topup.cancel": "Cancel",

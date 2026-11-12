@@ -182,22 +182,36 @@ function TopupModal({ onClose }: { onClose: () => void }) {
     </div>
   );
 
-  // 汇率行尾注：加载中 … / 离线兜底 warn 标签 / 数据日期与来源
+  // 汇率行尾注：加载中 … / 离线兜底 warn 标签 + 数据来源行 / 在线时的日期与来源
   const renderFxMeta = () => {
     if (fx.loading) return <span style={{ fontSize: 10, color: "#666" }}>…</span>;
     if (fx.offline) {
+      // 离线：pill 标签与「兜底来源」行都要在——否则用户看不出数据不是实时的
       return (
         <span
           style={{
-            fontSize: 10,
-            color: "#fa0",
-            border: "1px solid #fa0",
-            borderRadius: 999,
-            padding: "1px 8px",
-            fontWeight: "bold",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "flex-end",
+            gap: 4,
+            textAlign: "right",
           }}
         >
-          {t(lang, "shop.topup.fxOffline")}
+          <span
+            style={{
+              fontSize: 10,
+              color: "#fa0",
+              border: "1px solid #fa0",
+              borderRadius: 999,
+              padding: "1px 8px",
+              fontWeight: "bold",
+            }}
+          >
+            {t(lang, "shop.topup.fxOffline")}
+          </span>
+          <span style={{ fontSize: 10, color: "#fa0" }}>
+            {t(lang, "shop.topup.fxFallbackMeta", { source: fx.source || "fallback" })}
+          </span>
         </span>
       );
     }

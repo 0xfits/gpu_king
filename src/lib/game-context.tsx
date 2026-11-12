@@ -17,12 +17,17 @@ import {
   repairState,
   calcOfflineGain,
 } from "./game";
-import { Lang, loadLang, LANG_KEY } from "./i18n";
+import { Lang, loadLang, DEFAULT_LANG, LANG_KEY } from "./i18n";
 
 const SAVE_KEY = "gpu-king-v8";
 /** 旧存档键（gpu-tycoon 时代）：仅用于迁移读取，读到后写入新键，旧键保留不删 */
 const LEGACY_SAVE_KEY = "gpu-tycoon-v8";
 
+/**
+ * 两阶段载入：SSR 与客户端首帧都用 initialState()（保证 hydration 文本一致），
+ * 挂载后再 dispatch hydrate 把 loadInitial() 结果整体换上。
+ * loadInitial 内部（旧键迁移 / 离线收益 / repairState）原样保留，全程只在客户端执行一次。
+ */
 function loadInitial(): GameState {
   if (typeof window === "undefined") return initialState();
   try {
@@ -89,10 +94,21 @@ export function useGame(): GameCtx {
 }
 
 export function GameProvider({ children }: { children: ReactNode }) {
-  const [state, dispatch] = useReducer(reducer, undefined, loadInitial);
-  const [lang, setLang] = useState<Lang>(loadLang);
+  // 1) 首帧（服务端 SSR 与客户端 hydration 第一趟）：两者都用 initialState()，文本逐字一致
+  const [state, dispatch] = useReducer(reducer, undefined, initialState);
+  // 语言同理：首帧固定默认 lang，挂载后才应用存储值
+  const [lang, setLang] = useState<Lang>(DEFAULT_LANG);
+  // 挂载完成标记：只有它为 true 才允许写回 LANG_KEY，避免把默认语言覆盖掉存储值
+  const [hydrated, setHydrated] = useState(false);
   const [flash, setFlash] = useState(false);
   const lastTsRef = useRef<number>(Date.now());
+
+  // 2) 挂载后：读存档（迁存、离线收益、repairState 一次性完成）+ 应用存储语言
+  useEffect(() => {
+    dispatch({ type: "hydrate", state: loadInitial() });
+    setLang(loadLang());
+    setHydrated(true);
+  }, []);
 
   // 真实时间驱动：每一帧按实际经过秒数结算利息与被动 HASH
   useEffect(() => {
@@ -119,8 +135,10 @@ export function GameProvider({ children }: { children: ReactNode }) {
   }, [state]);
 
   useEffect(() => {
+    // 首帧（hydrated=false）不写：否则默认 lang 会先把存储值冲掉
+    if (!hydrated) return;
     localStorage.setItem(LANG_KEY, lang);
-  }, [lang]);
+  }, [lang, hydrated]);
 
   const pulse = () => {
     setFlash(true);

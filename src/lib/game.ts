@@ -241,6 +241,8 @@ export interface Proposal {
 }
 
 export type GameAction =
+  /** 挂载后整体替换：把 localStorage 存档（loadInitial 结果）盖到 SSR 首帧状态上 */
+  | { type: "hydrate"; state: GameState }
   | { type: "tick"; dt: number }
   | { type: "switch"; memberId: string }
   | { type: "mine" }
@@ -523,6 +525,12 @@ function removeMember(state: GameState, memberId: string, kicked: boolean): Game
 
 export function applyAction(state: GameState, action: GameAction): GameState {
   switch (action.type) {
+    case "hydrate": {
+      // 存档整体替换（纯函数）：SSR/首帧与客户端一致，挂载后再换成存档；
+      // 迁移、离线收益、repairState 全在 loadInitial 内完成，这里不再做任何计算
+      return action.state;
+    }
+
     case "tick": {
       // 真实时间连续结算：dt 为真实经过秒数（限幅防跳变）
       if (!state.org) return { ...state, lastSave: Date.now() };

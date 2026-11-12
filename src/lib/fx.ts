@@ -17,7 +17,7 @@ export interface FxData {
 }
 
 /**
- * 仅断网兜底，UI 必须标注离线（shop.topup.fxOffline）。
+ * 仅断网兜底，UI 必须标注离线（shop.topup.fxOffline 标签 + shop.topup.fxFallbackMeta 来源行）。
  * 绝不作为真实汇率展示，也不写入日志口径——日志记的是本次实际使用的 rate。
  */
 export const FALLBACK_RATES = { CNY: 7.1, HKD: 7.8 };
