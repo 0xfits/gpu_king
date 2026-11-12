@@ -359,7 +359,10 @@ export async function applyActionToCompany(
       ],
     );
     if (!upd.rowCount) {
-      // FOR UPDATE 下理论不可达；兜底回读最新版本，按冲突返回
+      // FOR UPDATE 下理论不可达；兜底回读最新版本，按冲突返回。
+      // 安全前提：本条 update 是本事务的**第一条写语句**（之前只有 select for update），
+      // 0 行受影响 ⇒ 库里什么都没变 ⇒ return 后 COMMIT 是空事务、零副作用。
+      // ⚠ 若将来在这条 update 之前插入任何写语句，此分支必须改成 throw（让 withTx ROLLBACK）。
       const again = await client.query<CompanyRow>(
         "select state, state_version from companies where id = $1",
         [slug],
@@ -531,11 +534,13 @@ export type OpenGiftOutcome =
 
 /**
  * 开启一个邀请礼盒（必须是该公司成员）：
- * 事务 → 成员校验 → SELECT ... FOR UPDATE → repair + settle → applyAction(openGift) →
- * 写回（state_version + 1）→ 补写 game_logs。
+ * 事务 → **公司存在性校验** → 成员校验 → SELECT ... FOR UPDATE → repair + settle →
+ * applyAction(openGift) → 写回（state_version + 1）→ 补写 game_logs。
  *
- * 已开 / 不存在 ⇒ reducer 返回同一引用 ⇒ 400 `gift_not_openable`（不写库）；
- * 非成员 ⇒ 403 `not_member`；公司不存在 ⇒ 404 `not_found`。
+ * 公司不存在 ⇒ 404 `not_found`（**先判存在性，再判成员身份**：反序会让「不存在的公司」
+ * 因成员查询恒不命中而被误报成 403 `not_member`）；非成员 ⇒ 403 `not_member`；
+ * 已开 / 不存在 ⇒ reducer 返回同一引用 ⇒ 400 `gift_not_openable`（不写库）。
+ * 以上三条都在本事务**第一条写语句之前**判失败 ⇒ 纯读校验，return 后 COMMIT 是空事务、零副作用。
  */
 export async function openGift(
   slug: string,
@@ -544,6 +549,12 @@ export async function openGift(
 ): Promise<OpenGiftOutcome> {
   await ensureSchema();
   return withTx<OpenGiftOutcome>(async (client): Promise<OpenGiftOutcome> => {
+    // 0) 公司存在性：先查（纯读），不存在 ⇒ 404。必须先于成员校验。
+    const exists = await client.query("select 1 as x from companies where id = $1", [slug]);
+    if (!exists.rowCount) {
+      return { kind: "error", status: 404, error: "not_found", msg: `公司 ${slug} 不存在` };
+    }
+
     const mem = await client.query(
       "select 1 as x from company_members where company_id = $1 and discord_id = $2",
       [slug, discordId],
@@ -605,6 +616,9 @@ export async function openGift(
       ],
     );
     if (!upd.rowCount) {
+      // 同上：本条 update 是本事务第一条写语句（前面只有 select / select ... for update），
+      // 0 行受影响 ⇒ 无任何落库 ⇒ return 409 安全。
+      // ⚠ 若将来在这条 update 之前插入任何写语句，必须改成 throw 回滚。
       return {
         kind: "error",
         status: 409,

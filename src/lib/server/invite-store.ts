@@ -12,12 +12,27 @@ import { ensureSchema } from "./schema";
  *   重复领取走 `on conflict do nothing`（0 行受影响 ⇒ alreadyClaimed，**不重复发钱、不再加礼盒**）。
  * - 发 200 赠金（`users.grant_usd`）与加 1 礼盒（`companies.gift_boxes` + `state.gifts`）
  *   与邀请行插入在**同一事务**内完成，回滚即全部作废。
+ * - ★ **事务内「已写过东西」之后决定失败必须 throw，不得 return**：`withTx` 只对「回调抛错」
+ *   ROLLBACK，对「回调正常返回」一律 COMMIT ⇒ return 一个 409 对象＝把钱和邀请行提交了、
+ *   礼盒却没加，且 `invites.invited_discord_id` UNIQUE 使重试恒 `alreadyClaimed`。
+ *   已在写之前完成的纯读校验（404 / dissolved / self_invite / alreadyClaimed）才可以 return。
  * - 写 numeric 一律 String(n)，读回一律 Number()（pg numeric/int8 → string）。
  * - 防自邀：当前账号已是该公司 `company_members.discord_id` 成员 ⇒ 400 `self_invite`。
  */
 
 /** 每个新用户经邀请注册可得的赠金（USD，仅限出资，不可提现/消费） */
 export const INVITE_GRANT_USD = 200;
+
+/**
+ * 事务内写失败信号（唯一用途：让 withTx 走 ROLLBACK，再由本模块把状态码映射回 409）。
+ * 不用裸 `return` 是因为 return 会被 withTx 当作成功 COMMIT —— 那正是「半截写入」的成因。
+ */
+class TxWriteFailed extends Error {
+  constructor(readonly code: string) {
+    super(code);
+    this.name = "TxWriteFailed";
+  }
+}
 
 const dec = (n: number): string => String(Number.isFinite(n) ? n : 0);
 
@@ -137,18 +152,28 @@ export async function claimInvite(input: ClaimInput): Promise<ClaimOutcome> {
       [JSON.stringify(next), giftBoxes, Number(row.state_version) + 1, slug, row.state_version],
     );
     if (!upd.rowCount) {
-      return {
-        kind: "error",
-        status: 409,
-        error: "conflict",
-        msg: "公司状态刚被其它操作更新，请重试",
-      };
+      // ★ 必须 throw，不能 return：此刻 invites 行与 users.grant_usd 已在本事务内写入，
+      //   return 会被 withTx 当作正常返回并 COMMIT ⇒ 钱和邀请行落库、礼盒没加，
+      //   且 UNIQUE 使重试恒 alreadyClaimed ⇒ 邀请方永久少一盒。
+      //   throw ⇒ withTx ROLLBACK ⇒ 三处写入一起作废（下方 catch 再把状态码映射成 409）。
+      throw new TxWriteFailed("gift_boxes_update_failed");
     }
 
     // 5) 两条历史日志（game_logs）
     await insertLogs(client, slug, entries);
 
     return { kind: "ok", grantedUsd: INVITE_GRANT_USD, giftBoxes, alreadyClaimed: false };
+  }).catch((err: unknown): ClaimOutcome => {
+    // 写失败已回滚完毕，这里只负责把信号映射回原来的 409（不影响其它异常继续上抛 500）
+    if (err instanceof TxWriteFailed) {
+      return {
+        kind: "error",
+        status: 409,
+        error: "conflict",
+        msg: "公司状态刚被其它操作更新，请重试（本次领取已整体回滚，未产生任何写入）",
+      };
+    }
+    throw err;
   });
 }
 
