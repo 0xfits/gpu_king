@@ -1,0 +1,51 @@
+name: Deploy to Vercel
+
+# push 到 main 即部署生产；也可在 Actions 页手动 Run workflow。
+# 需要仓库 secret: VERCEL_TOKEN（Vercel → Account Settings → Tokens 创建）
+# 说明：本地 CLI 部署（npx vercel --prod）与这条流水线互不冲突，都指向同一个生产项目。
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: vercel-production
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      VERCEL_ORG_ID: team_E3f4qyOhw7uTfpeK0FQrbATE
+      VERCEL_PROJECT_ID: prj_ZA9pFGF3GvITGgZlupH38aSygyIt
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Vercel CLI
+        run: npm i -g vercel@latest
+
+      - name: Pull Vercel environment (production)
+        run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+
+      - name: Build
+        run: vercel build --prod --token="$VERCEL_TOKEN"
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+
+      - name: Deploy to production
+        run: vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN"
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
