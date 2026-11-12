@@ -8,6 +8,15 @@ import { getPool } from "../db";
  * 构建机上没有 Neon 连接，且建表属于运行时副作用。
  */
 export const SCHEMA_SQL = `
+create table if not exists users (
+  discord_id text primary key,
+  username text,
+  global_name text,
+  avatar text,
+  created_at timestamptz not null default now(),
+  last_login_at timestamptz not null default now()
+);
+
 create table if not exists companies (
   id text primary key,
   name text not null,

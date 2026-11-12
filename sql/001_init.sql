@@ -3,6 +3,16 @@
 -- 运行时同款 DDL 见 src/lib/server/schema.ts（首次 API 请求时 ensureSchema() 自动执行）。
 -- 红线：neon_auth.* 为 Neon Auth 内置表，本文件不涉及、也绝不改动。
 
+-- 用户：Discord 账号权威数据（P1a OAuth 登录落库；cookie 里的 name/avatar 只作兜底）
+create table if not exists users (
+  discord_id text primary key,                 -- Discord user id
+  username text,                               -- Discord username（唯一化前的原始名）
+  global_name text,                            -- 展示名，优先于 username
+  avatar text,                                 -- Discord avatar hash（非 URL）
+  created_at timestamptz not null default now(),
+  last_login_at timestamptz not null default now()
+);
+
 -- 公司：id 直接用 slug（公司名小写，唯一），state 为完整 GameState 的权威副本
 create table if not exists companies (
   id text primary key,                    -- 用 slug 作为主键（公司名唯一）
