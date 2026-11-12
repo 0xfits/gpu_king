@@ -50,6 +50,22 @@ create table if not exists game_logs (
 );
 
 create index if not exists game_logs_company_idx on game_logs (company_id, at desc);
+
+-- —— P1b 增量：邀请奖励 + 礼盒（幂等，可在已有库上重复执行）——
+alter table users add column if not exists grant_usd numeric(24,6) not null default 0;
+alter table companies add column if not exists gift_boxes integer not null default 0;
+
+create table if not exists invites (
+  id bigserial primary key,
+  inviter_company text not null references companies(id) on delete cascade,
+  invited_discord_id text not null unique,
+  invitee_company text,
+  granted_usd numeric(24,6) not null default 200,
+  gift_granted boolean not null default true,
+  claimed_at timestamptz not null default now()
+);
+
+create index if not exists invites_inviter_idx on invites (inviter_company);
 `;
 
 /** 模块级 promise：整个进程只建一次表，后续请求直接 await 同一个结果 */

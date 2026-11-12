@@ -184,7 +184,7 @@ const zh: Dict = {
   // —— 日志模板 ——
   "log.boot": "三人出資共 {cap} USD，繳註冊費 {fee}，帳戶 {funds} USD",
   "log.rename": "公司命名為「{name}」",
-  "log.found": "成立公司「{name}」：繳註冊費 {fee} USD（{n} 人均攤），分紅池重置",
+  "log.found": "成立公司「{name}」：創始人出資 {seed} USD（優先動用贈金），繳註冊費 {fee} USD（{n} 人均攤），分紅池重置",
   "log.kickStart": "{by} 發起罷免 {target}（貢獻度過低）",
   "log.rejected": "表決未通過（{yes} 贊成 / {no} 反對），本次決策作廢",
   "log.expandOk":
@@ -200,6 +200,9 @@ const zh: Dict = {
   "log.buy": "{m} 在商店購買 {g}，花費 {price} USD",
   "log.buyDur": "{m} 在商店購買 {g}，花費 {price} USD（耐久 {dur} 天，僅此一件）",
   "log.topup": "{m} 向 {r} 充值 {cur}{amount}，扣 {usd} USD（匯率 1 USD ≈ {rate} {cur}）",
+  "log.inviteJoin": "受邀股東 {d} 入駐：獲贈金 {usd} USD（僅限出資，不可消費）",
+  "log.inviteGift": "成功邀請 1 人，獲 1 個邀請禮盒（未開 {boxes} 個）",
+  "log.giftOpen": "開啟邀請禮盒（來自 {from}）：抽中 {d}，公司 {dom} 聲望 +{gain}",
   "member.prefix": "成員 ",
 };
 
@@ -366,7 +369,7 @@ const en: Dict = {
 
   "log.boot": "3 founders pooled {cap} USD, paid {fee} incorporation fee, balance {funds} USD",
   "log.rename": 'Company named "{name}"',
-  "log.found": "Founded \"{name}\": {fee} USD incorporation fee split across {n}, dividend pool reset",
+  "log.found": "Founded \"{name}\": founders paid in {seed} USD (grants first), {fee} USD incorporation fee split across {n}, dividend pool reset",
   "log.kickStart": "{by} filed a recall against {target} (contribution too low)",
   "log.rejected": "Vote failed ({yes} yes / {no} no) — decision void",
   "log.expandOk":
@@ -382,6 +385,9 @@ const en: Dict = {
   "log.buy": "{m} bought {g} at the shop for {price} USD",
   "log.buyDur": "{m} bought {g} at the shop for {price} USD ({dur}-day durability, one of one)",
   "log.topup": "{m} topped up {cur}{amount} for {r}, charged {usd} USD (rate 1 USD ≈ {rate} {cur})",
+  "log.inviteJoin": "Invited shareholder {d} joined: grant +{usd} USD (funding only, non-spendable)",
+  "log.inviteGift": "1 successful invite → 1 invite gift box ({boxes} unopened)",
+  "log.giftOpen": "Opened invite gift box (from {from}): drew {d}; company {dom} rep +{gain}",
   "member.prefix": "Member ",
 };
 

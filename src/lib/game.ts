@@ -179,6 +179,16 @@ export interface Member {
   rep: RepSet;
 }
 
+/** 邀请礼盒：邀请方每成功邀 1 人得 1 个，不自动开，必须用户点击开启 */
+export interface GiftBox {
+  id: string;
+  opened: boolean;
+  /** 发放时刻（毫秒） */
+  at: number;
+  /** 产生该礼盒的邀请方公司 slug（便于日志与展示溯源） */
+  from?: string;
+}
+
 export type Org = { name: string; members: string[] } | null;
 
 /** 公司命名：仅允许字母+数字，1~20 位，严格拒绝其它字符 */
@@ -210,6 +220,24 @@ export interface GameState {
   companyRep: RepSet;
   /** 成员个人钱包：离队结算款暂存于此，归队时用于补缴 */
   wallets: Record<string, number>;
+  /**
+   * 赠金余额（邀请注册所得 200 USD）：**不可提现、不可消费**（商店/充值一律不可用），
+   * 只能用于出资（成立 / 归队补缴）。
+   */
+  grants: Record<string, number>;
+  /**
+   * 赠金孳息锁定额：已进入个人钱包、但由赠金派生的那部分，同样**仅限出资**。
+   * 与 wallets 是「账内子账」关系：锁定额包含在 wallets 里，
+   * spendableWallet(state,id) = wallets − lockedWallets。
+   */
+  lockedWallets: Record<string, number>;
+  /** 邀请礼盒列表（不自动开；开启随机得一项捐赠的公司声望） */
+  gifts: GiftBox[];
+  /**
+   * 累计出资与其中赠金来源（grants + lockedWallets 计入 fromGrants），
+   * 用于离队结算时按 fromGrants/total 拆分红的可支配/锁定比例。
+   */
+  funding: Record<string, { total: number; fromGrants: number }>;
   /** 捐赠页：donationId -> 累计次数（HASH 计价，声望即时生效） */
   donations: Record<string, number>;
   /** 消费商店：goodId -> 购买次数；topup:<region>:<amount> -> 充值次数 */
@@ -256,6 +284,8 @@ export type GameAction =
   | { type: "donate"; donationId: string }
   | { type: "buy"; goodId: string }
   | { type: "topup"; region: TopupRegion; amount: number; usdCost: number; rate: number }
+  /** 开启邀请礼盒（不自动开；已开/不存在 → 返回同一引用，服务端映射 400） */
+  | { type: "openGift"; giftId: string }
   | { type: "close" };
 
 export function initialState(seed = 20261112): GameState {
@@ -269,6 +299,10 @@ export function initialState(seed = 20261112): GameState {
     dividends: 0,
     companyRep: { ...COMPANY_REP_INIT },
     wallets: Object.fromEntries(members.map((m) => [m.id, 0])),
+    grants: {},
+    lockedWallets: {},
+    gifts: [],
+    funding: {},
     donations: {},
     purchases: {},
     items: {},
@@ -297,6 +331,119 @@ export function gpuById(id: string): GPU | undefined {
 
 export function memberById(state: GameState, id: string): Member | undefined {
   return state.members.find((m) => m.id === id);
+}
+
+// —— 双池模型：赠金池（grants + lockedWallets）与可支配钱包 ——
+// 赠金（邀请注册 200 USD）与它派生的孳息都**不可提现、不可消费**（buy/topup 只走公司账户），
+// 只能用于出资（成立 / 归队补缴）；分红进钱包时按「赠金出资占比」拆出锁定部分。
+
+/** 未使用的赠金余额（仅限出资） */
+export function grantBalance(state: GameState, id: string): number {
+  return state.grants?.[id] ?? 0;
+}
+
+/** 可支配个人钱包 = wallets − lockedWallets（不含任何赠金派生额） */
+export function spendableWallet(state: GameState, id: string): number {
+  const w = state.wallets?.[id] ?? 0;
+  const l = state.lockedWallets?.[id] ?? 0;
+  return Math.max(0, w - l);
+}
+
+/** 锁定总额（已进钱包的赠金孳息，仅限出资）；赠金本金在 grants 池，见 grantBalance */
+export function lockedTotal(state: GameState, id: string): number {
+  return state.lockedWallets?.[id] ?? 0;
+}
+
+/** 未开启的邀请礼盒（礼盒不自动开，必须用户点击） */
+export function pendingGifts(state: GameState): GiftBox[] {
+  return (state.gifts ?? []).filter((g) => !g.opened);
+}
+
+/** 赠金出资占比 = fromGrants / total（无出资记录 → 0，即分红全额可支配） */
+export function grantShareRatio(state: GameState, id: string): number {
+  const f = state.funding?.[id];
+  if (!f || !(f.total > 0)) return 0;
+  return clamp01(f.fromGrants / f.total);
+}
+
+/**
+ * 分红拆分：按赠金出资占比把一笔钱拆成「可支配」与「锁定」两份。
+ * fromGrants=100 / total=200 ⇒ 一半进 lockedWallets；无出资记录 ⇒ 全额可支配。
+ */
+export function splitByGrantShare(
+  state: GameState,
+  id: string,
+  amount: number,
+): { spendable: number; locked: number } {
+  const safe = Math.max(0, amount);
+  const locked = safe * grantShareRatio(state, id);
+  return { spendable: safe - locked, locked };
+}
+
+/** 出资扣款所需的四个池（内部使用：按值拷贝，调用方整体写回，保持 reducer 纯函数） */
+interface FundingPools {
+  grants: Record<string, number>;
+  wallets: Record<string, number>;
+  lockedWallets: Record<string, number>;
+  funding: Record<string, { total: number; fromGrants: number }>;
+}
+
+/**
+ * 一次出资扣款，来源顺序固定：
+ *   1) grants[id]（赠金本金）→ 2) 可支配钱包 → 3) 锁定孳息（同样是赠金派生，计入 fromGrants）；
+ * 并把实付累加进 funding[id]（total=实付，fromGrants=其中赠金来源）。
+ * 不足部分按实付记账，**不会**让任何池变负。
+ */
+function payForFunding(
+  pools: FundingPools,
+  id: string,
+  want: number,
+): { paid: number; fromGrants: number } {
+  let left = Math.max(0, want);
+  let fromGrants = 0;
+
+  const g = Math.min(pools.grants[id] ?? 0, left);
+  if (g > 0) {
+    pools.grants[id] = (pools.grants[id] ?? 0) - g;
+    left -= g;
+    fromGrants += g;
+  }
+
+  const spendable = Math.max(0, (pools.wallets[id] ?? 0) - (pools.lockedWallets[id] ?? 0));
+  const s = Math.min(spendable, left);
+  if (s > 0) {
+    pools.wallets[id] = (pools.wallets[id] ?? 0) - s;
+    left -= s;
+  }
+
+  const lockedAvail = Math.min(pools.lockedWallets[id] ?? 0, pools.wallets[id] ?? 0);
+  const l = Math.min(lockedAvail, left);
+  if (l > 0) {
+    pools.wallets[id] = (pools.wallets[id] ?? 0) - l;
+    pools.lockedWallets[id] = (pools.lockedWallets[id] ?? 0) - l;
+    left -= l;
+    fromGrants += l;
+  }
+
+  const paid = Math.max(0, want - left);
+  if (paid > 0) {
+    const prev = pools.funding[id] ?? { total: 0, fromGrants: 0 };
+    pools.funding[id] = {
+      total: prev.total + paid,
+      fromGrants: prev.fromGrants + fromGrants,
+    };
+  }
+  return { paid, fromGrants };
+}
+
+/** 从 state 复制出一份可变的出资池快照（纯函数：调用方不改原 state） */
+function fundingPoolsOf(state: GameState): FundingPools {
+  return {
+    grants: { ...(state.grants ?? {}) },
+    wallets: { ...(state.wallets ?? {}) },
+    lockedWallets: { ...(state.lockedWallets ?? {}) },
+    funding: JSON.parse(JSON.stringify(state.funding ?? {})) as FundingPools["funding"],
+  };
 }
 
 /** 综合声望 = 四域按权重加权（决定扩产成功率） */
@@ -487,6 +634,13 @@ function startVote(state: GameState, proposal: Proposal, log?: [string, Record<s
 /** 成员离开（辞职或被罢免）：结算入个人钱包，席位留空槽；全员离开则公司解散 */
 function removeMember(state: GameState, memberId: string, kicked: boolean): GameState {
   const payout = leavePayout(state, memberId, kicked);
+  // 结算款入钱包：按「赠金出资占比」拆成可支配 + 锁定两份（赠金及其孳息不可提现）；
+  // 无出资记录 ⇒ 占比 0 ⇒ 全额进可支配钱包（旧存档行为不变）
+  const split = splitByGrantShare(state, memberId, payout.total);
+  const wallets = { ...(state.wallets ?? {}) };
+  const lockedWallets = { ...(state.lockedWallets ?? {}) };
+  wallets[memberId] = (wallets[memberId] ?? 0) + split.spendable + split.locked;
+  lockedWallets[memberId] = (lockedWallets[memberId] ?? 0) + split.locked;
   const members = (state.org?.members ?? []).map((id) => (id === memberId ? "" : id));
   const dissolved = members.every((id) => id === "");
   let out: GameState = {
@@ -495,10 +649,8 @@ function removeMember(state: GameState, memberId: string, kicked: boolean): Game
     companyRep: kicked
       ? { ...state.companyRep, media: repClamp(state.companyRep.media - COMPANY_KICK_MEDIA) }
       : state.companyRep,
-    wallets: {
-      ...state.wallets,
-      [memberId]: (state.wallets[memberId] ?? 0) + payout.total,
-    },
+    wallets,
+    lockedWallets,
     dividends: Math.max(0, state.dividends - payout.dividend),
     org: dissolved || !state.org ? null : { name: state.org.name, members },
     activeId: members.includes(state.activeId) ? state.activeId : (members.find((id) => id) ?? ""),
@@ -630,20 +782,26 @@ export function applyAction(state: GameState, action: GameAction): GameState {
     }
 
     case "recruit": {
-      // 股东归队：补缴当前市值 1/3（从其个人钱包扣，注入公司池），不足则拒绝
+      // 股东归队：补缴当前市值 1/3，注入公司池。
+      // 资金来源优先赠金池（grants），不足再扣个人钱包（可支配 → 锁定孳息），并计入 funding
       if (!state.org || state.proposal) return state;
       const hasEmpty = state.org.members.some((id) => id === "");
       if (!hasEmpty || !state.members.some((m) => m.id === action.memberId)) return state;
       if (activeMembers(state).includes(action.memberId)) return state;
       const cost = rejoinCost(state);
-      const wallet = state.wallets[action.memberId] ?? 0;
-      if (wallet < cost) return state;
+      const pools = fundingPoolsOf(state);
+      const available = (pools.grants[action.memberId] ?? 0) + (pools.wallets[action.memberId] ?? 0);
+      if (available < cost) return state;
+      const { paid } = payForFunding(pools, action.memberId, cost);
       const members = state.org.members.map((id) => (id === "" ? action.memberId : id));
       const nb = newbieRep(state);
       return {
         ...state,
-        usd: state.usd + cost,
-        wallets: { ...state.wallets, [action.memberId]: wallet - cost },
+        usd: state.usd + paid,
+        grants: pools.grants,
+        wallets: pools.wallets,
+        lockedWallets: pools.lockedWallets,
+        funding: pools.funding,
         org: { ...state.org, members },
         members: state.members.map((m) =>
           m.id === action.memberId
@@ -658,22 +816,31 @@ export function applyAction(state: GameState, action: GameAction): GameState {
         log: pushLog(
           state,
           "log.recruit",
-          { m: action.memberId, cost: cost.toFixed(6), cap: marketCap(state).toFixed(6), div: REJOIN_DIVISOR, nb },
+          { m: action.memberId, cost: paid.toFixed(6), cap: marketCap(state).toFixed(6), div: REJOIN_DIVISOR, nb },
         ).log,
       };
     }
 
     case "found": {
-      // 重新成立公司：命名严格校验（字母+数字），缴注册费 100，分红池重置
+      // 重新成立公司：命名严格校验（字母+数字），缴注册费 100，分红池重置。
+      // 创始人重新出资：每人 SEED_MONEY，**优先扣赠金池 grants，不足再扣个人钱包**，
+      // 实付累加进 funding（fromGrants 只记赠金部分），并注入公司账户
       if (state.org) return state;
       if (!isValidCompanyName(action.name)) return state;
       const idle = state.members.filter((m) => !isInOrg(state, m.id));
       if (idle.length === 0) return state;
       if (state.usd < INCORPORATION_FEE) return state;
       const crew = idle.slice(0, COMPANY_SIZE).map((m) => m.id);
+      const pools = fundingPoolsOf(state);
+      let raised = 0;
+      for (const id of crew) raised += payForFunding(pools, id, SEED_MONEY).paid;
       let out: GameState = {
         ...state,
-        usd: state.usd - INCORPORATION_FEE,
+        usd: state.usd + raised - INCORPORATION_FEE,
+        grants: pools.grants,
+        wallets: pools.wallets,
+        lockedWallets: pools.lockedWallets,
+        funding: pools.funding,
         dividends: 0,
         org: { name: action.name, members: crew },
         activeId: crew[0],
@@ -681,7 +848,12 @@ export function applyAction(state: GameState, action: GameAction): GameState {
           crew.includes(m.id) ? { ...m, contribution: 0 } : m,
         ),
       };
-      out = pushLog(out, "log.found", { name: action.name, fee: INCORPORATION_FEE, n: crew.length });
+      out = pushLog(out, "log.found", {
+        name: action.name,
+        fee: INCORPORATION_FEE,
+        n: crew.length,
+        seed: raised.toFixed(6),
+      });
       return out;
     }
 
@@ -734,7 +906,9 @@ export function applyAction(state: GameState, action: GameAction): GameState {
     }
 
     case "buy": {
-      // 消费商店：公司账户 USD 计价。耐用品同时只能持有一件，耐久未耗尽前不可再买
+      // 消费商店：**只**动公司账户 USD（state.usd）。
+      // 赠金池 grants 与锁定池 lockedWallets 不参与任何消费路径（不可提现、不可消费）
+      // 耐用品同时只能持有一件，耐久未耗尽前不可再买
       if (!state.org || state.proposal) return state;
       const good = GOODS.find((g) => g.id === action.goodId);
       if (!good) return state;
@@ -756,6 +930,7 @@ export function applyAction(state: GameState, action: GameAction): GameState {
 
     case "topup": {
       // 手机话费充值：外部实时汇率折算 USD 扣款（reducer 纯函数，汇率由 UI 传入，不依赖网络）
+      // 消费只走公司账户（state.usd），**绝不**触碰 grants / lockedWallets 两池
       if (!state.org || state.proposal) return state;
       const region = TOPUP_REGIONS.find((r) => r.key === action.region);
       if (!region || !region.amounts.includes(action.amount)) return state;
@@ -777,6 +952,36 @@ export function applyAction(state: GameState, action: GameAction): GameState {
         amount: action.amount,
         usd: usdCost.toFixed(6),
         rate,
+      });
+      return out;
+    }
+
+    case "openGift": {
+      // 邀请礼盒：必须手动开启；用状态内确定性 rng 抽 DONATIONS 四项之一（不用 Math.random）。
+      // 已开 / 不存在 → 返回同一引用（服务端映射成 400 gift_not_openable）
+      const list = state.gifts ?? [];
+      const idx = list.findIndex((g) => g.id === action.giftId);
+      if (idx < 0 || list[idx].opened) return state;
+      const gift = list[idx];
+      const [r, rng] = nextRandom(state.rng);
+      const pick =
+        DONATIONS[Math.min(DONATIONS.length - 1, Math.floor(r * DONATIONS.length))];
+      if (!pick || !state.org) return state;
+      let out: GameState = {
+        ...state,
+        rng,
+        gifts: list.map((g, i) => (i === idx ? { ...g, opened: true } : g)),
+        donations: { ...state.donations, [pick.id]: (state.donations[pick.id] ?? 0) + 1 },
+        companyRep: {
+          ...state.companyRep,
+          [pick.domain]: repClamp(state.companyRep[pick.domain] + pick.repGain),
+        },
+      };
+      out = pushLog(out, "log.giftOpen", {
+        d: pick.labelKey,
+        dom: REP_DOMAINS.find((x) => x.key === pick.domain)?.labelKey ?? pick.domain,
+        gain: pick.repGain,
+        from: gift.from ?? "—",
       });
       return out;
     }
@@ -961,6 +1166,48 @@ export function calcOfflineGain(state: GameState): { usd: number; hash: number }
   return { usd: Math.floor(usd * 1e6) / 1e6, hash: Math.floor(hash) };
 }
 
+/** 数值字段兜底：非有限数字 → 0（旧存档/脏数据不许带 NaN 进 reducer） */
+function finiteOrZero(n: unknown): number {
+  return typeof n === "number" && Number.isFinite(n) ? n : 0;
+}
+
+function numberMap(v: unknown): Record<string, number> {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return {};
+  const out: Record<string, number> = {};
+  for (const [k, n] of Object.entries(v as Record<string, unknown>)) out[k] = finiteOrZero(n);
+  return out;
+}
+
+function fundingMap(v: unknown): Record<string, { total: number; fromGrants: number }> {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return {};
+  const out: Record<string, { total: number; fromGrants: number }> = {};
+  for (const [k, raw] of Object.entries(v as Record<string, unknown>)) {
+    const f = (raw ?? {}) as { total?: unknown; fromGrants?: unknown };
+    const total = Math.max(0, finiteOrZero(f.total));
+    const fromGrants = Math.max(0, Math.min(finiteOrZero(f.fromGrants), total));
+    if (total > 0) out[k] = { total, fromGrants };
+  }
+  return out;
+}
+
+function giftList(v: unknown): GiftBox[] {
+  if (!Array.isArray(v)) return [];
+  const out: GiftBox[] = [];
+  for (const raw of v) {
+    if (!raw || typeof raw !== "object") continue;
+    const g = raw as Partial<GiftBox>;
+    if (typeof g.id !== "string" || g.id === "") continue;
+    const gift: GiftBox = {
+      id: g.id,
+      opened: !!g.opened,
+      at: Number.isFinite(g.at as number) ? (g.at as number) : Date.now(),
+    };
+    if (typeof g.from === "string") gift.from = g.from;
+    out.push(gift);
+  }
+  return out;
+}
+
 /** 载入修复：补齐缺失字段，并自动结算卡死在投票态的历史表决 */
 export function repairState(state: GameState): GameState {
   const s: GameState = {
@@ -971,6 +1218,11 @@ export function repairState(state: GameState): GameState {
     purchases: state.purchases ?? {},
     items: state.items ?? {},
     wallets: state.wallets ?? Object.fromEntries(state.members.map((m) => [m.id, 0])),
+    // P1b 新字段：gpu-king-v8 等旧存档没有这四项，补默认值（绝不抛错）
+    grants: numberMap(state.grants),
+    lockedWallets: numberMap(state.lockedWallets),
+    gifts: giftList(state.gifts),
+    funding: fundingMap(state.funding),
     org: state.org
       ? { name: state.org.name || DEFAULT_COMPANY_NAME, members: state.org.members }
       : state.org,

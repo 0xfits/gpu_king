@@ -1,6 +1,7 @@
 import type { PoolClient } from "pg";
 import { query, queryOne, withTx } from "../db";
 import {
+  DONATIONS,
   HASH_PASSIVE_SCALE,
   OFFLINE_CAP_SEC,
   RESERVED_SLUGS,
@@ -14,6 +15,8 @@ import {
   type GameState,
   type LogEntry,
   type Member,
+  type RepDomain,
+  type RepSet,
 } from "../game";
 import { ensureSchema } from "./schema";
 
@@ -183,7 +186,11 @@ export async function getCompanySummary(slug: string): Promise<CompanySummary | 
   };
 }
 
-/** 允许经 API 提交的 action（服务端权威：hydrate/tick 一律拒收） */
+/**
+ * 允许经 API 提交的 action（服务端权威：hydrate/tick 一律拒收）。
+ * ⚠️ `openGift` **刻意不在此白名单**：礼盒开启必须走 /api/gifts/open（含成员身份校验），
+ *    若放进通用 /api/actions（P0 无鉴权），任何人都能替别人开礼盒。
+ */
 const ACTION_TYPES = new Set([
   "switch",
   "mine",
@@ -266,7 +273,8 @@ async function syncMembers(client: PoolClient, slug: string, members: Member[]):
   );
 }
 
-async function insertLogs(client: PoolClient, slug: string, entries: LogEntry[]): Promise<void> {
+/** 写历史日志（game_logs 表；展示用的 state.log 由 reducer 维护，两处保持同键） */
+export async function insertLogs(client: PoolClient, slug: string, entries: LogEntry[]): Promise<void> {
   for (const e of entries) {
     await client.query(
       `insert into game_logs (company_id, k, p, at) values ($1, $2, $3, $4)`,
@@ -477,5 +485,145 @@ export async function leaderboard(
     else row.hash = Number(r.hash);
     if (selfSlug && r.id === selfSlug) row.self = true;
     return row;
+  });
+}
+
+// —— P1b：邀请赠金读取 + 成员身份校验 + 礼盒开启 ——
+
+/**
+ * 某 Discord 账号待注入的赠金（`users.grant_usd`）；无该行 → 0。
+ * P1c 建公司时用它把赠金写进该成员位的 `state.grants`，**不改 createFromLocal 签名**。
+ */
+export async function pendingGrantFor(discordId: string): Promise<number> {
+  if (typeof discordId !== "string" || discordId === "") return 0;
+  await ensureSchema();
+  const row = await queryOne<{ grant_usd: string | number }>(
+    "select grant_usd from users where discord_id = $1",
+    [discordId],
+  );
+  if (!row) return 0;
+  const n = Number(row.grant_usd);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/** 是否为该公司在册成员（`company_members.discord_id` 命中即算） */
+export async function isCompanyMember(slug: string, discordId: string): Promise<boolean> {
+  if (!slug || !discordId) return false;
+  await ensureSchema();
+  const rows = await query<{ x: number }>(
+    "select 1 as x from company_members where company_id = $1 and discord_id = $2",
+    [slug, discordId],
+  );
+  return rows.length > 0;
+}
+
+export interface OpenGiftResult {
+  /** 抽中的捐赠项（reducer 用确定性 rng 选，服务端从 donations 计数差回推） */
+  gift: { donationId: string; labelKey: string; repGain: number; domain: RepDomain };
+  /** 开启后的公司四域声望（调用方按 gift.domain 取该域新值） */
+  companyRep: RepSet;
+  version: number;
+}
+
+export type OpenGiftOutcome =
+  | ({ kind: "ok" } & OpenGiftResult)
+  | { kind: "error"; status: number; error: string; msg: string };
+
+/**
+ * 开启一个邀请礼盒（必须是该公司成员）：
+ * 事务 → 成员校验 → SELECT ... FOR UPDATE → repair + settle → applyAction(openGift) →
+ * 写回（state_version + 1）→ 补写 game_logs。
+ *
+ * 已开 / 不存在 ⇒ reducer 返回同一引用 ⇒ 400 `gift_not_openable`（不写库）；
+ * 非成员 ⇒ 403 `not_member`；公司不存在 ⇒ 404 `not_found`。
+ */
+export async function openGift(
+  slug: string,
+  giftId: string,
+  discordId: string,
+): Promise<OpenGiftOutcome> {
+  await ensureSchema();
+  return withTx<OpenGiftOutcome>(async (client): Promise<OpenGiftOutcome> => {
+    const mem = await client.query(
+      "select 1 as x from company_members where company_id = $1 and discord_id = $2",
+      [slug, discordId],
+    );
+    if (!mem.rowCount) {
+      return {
+        kind: "error",
+        status: 403,
+        error: "not_member",
+        msg: "只有该公司成员可以开启礼盒",
+      };
+    }
+
+    const rows = await client.query<CompanyRow>(
+      "select id, name, state, state_version, last_settled_at from companies where id = $1 for update",
+      [slug],
+    );
+    const row = rows.rows[0];
+    if (!row) {
+      return { kind: "error", status: 404, error: "not_found", msg: `公司 ${slug} 不存在` };
+    }
+
+    const stored = repairState(parseState(row.state));
+    const { state: settled } = settle(stored, row.last_settled_at, Date.now());
+    const next = applyAction(settled, { type: "openGift", giftId });
+    if (next === settled) {
+      return {
+        kind: "error",
+        status: 400,
+        error: "gift_not_openable",
+        msg: "礼盒不存在或已开启",
+      };
+    }
+
+    const picked = DONATIONS.find(
+      (d) => (next.donations[d.id] ?? 0) > (settled.donations[d.id] ?? 0),
+    );
+    if (!picked) throw new Error("openGift 后未找到抽中的捐赠项（reducer 异常）");
+
+    const prevLog = new Set(settled.log);
+    const freshLogs = next.log.filter((e) => !prevLog.has(e)).slice(0, 20);
+    const newVersion = row.state_version + 1;
+    // gift_boxes 是「未开启礼盒」冗余计数：开启成功即 -1（与 state.gifts 保持一致）
+    const upd = await client.query(
+      `update companies
+          set state = $1, usd = $2, hash = $3, capacity = $4, dividends = $5,
+              gift_boxes = greatest(gift_boxes - 1, 0),
+              state_version = $6, last_settled_at = now(), updated_at = now()
+        where id = $7 and state_version = $8`,
+      [
+        JSON.stringify(next),
+        dec(next.usd),
+        dec(next.hash),
+        dec(next.capacity),
+        dec(next.dividends),
+        newVersion,
+        slug,
+        row.state_version,
+      ],
+    );
+    if (!upd.rowCount) {
+      return {
+        kind: "error",
+        status: 409,
+        error: "conflict",
+        msg: "公司状态刚被其它操作更新，请重试",
+      };
+    }
+    if (freshLogs.length) await insertLogs(client, slug, freshLogs);
+
+    return {
+      kind: "ok",
+      gift: {
+        donationId: picked.id,
+        labelKey: picked.labelKey,
+        repGain: picked.repGain,
+        domain: picked.domain,
+      },
+      companyRep: next.companyRep,
+      version: newVersion,
+    };
   });
 }

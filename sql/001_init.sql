@@ -49,3 +49,22 @@ create table if not exists game_logs (
 );
 
 create index if not exists game_logs_company_idx on game_logs (company_id, at desc);
+
+-- —— P1b 增量：邀请奖励 + 礼盒（幂等，可在已有库上重复执行）——
+-- 受邀人待注入赠金（个人钱包，仅限出资）
+alter table users add column if not exists grant_usd numeric(24,6) not null default 0;
+-- 邀请方公司未开启礼盒计数（冗余快速读；权威列表在 companies.state.gifts）
+alter table companies add column if not exists gift_boxes integer not null default 0;
+
+-- 邀请记录：invited_discord_id 唯一 ⇒ 同一账号只算一次（发钱/发礼盒的幂等基础）
+create table if not exists invites (
+  id bigserial primary key,
+  inviter_company text not null references companies(id) on delete cascade,
+  invited_discord_id text not null unique,   -- 同一账号只算一次
+  invitee_company text,
+  granted_usd numeric(24,6) not null default 200,
+  gift_granted boolean not null default true,
+  claimed_at timestamptz not null default now()
+);
+
+create index if not exists invites_inviter_idx on invites (inviter_company);
