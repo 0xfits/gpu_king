@@ -158,11 +158,11 @@ const zh: Dict = {
   "lang.switch": "語言",
   "nav.home": "首頁",
   "nav.company": "公司",
-  // —— 導航三頂（固定英文標籤，兩語一致，避免命名漂移）——
-  "nav.co": "Co: {name}",
-  "nav.coEmpty": "Co",
-  "nav.public": "Public",
-  "nav.shop": "Shop",
+  // —— 導航三頂（zh 用中文標籤、en 用英文標籤）——
+  "nav.co": "公司：{name}",
+  "nav.coEmpty": "公司",
+  "nav.public": "輿情",
+  "nav.shop": "商城",
   "home.addr": "公司地址",
   "home.copy": "複製",
   "home.copied": "已複製",

@@ -59,7 +59,8 @@ export function AppHeader() {
   const NAV: NavItem[] = [
     {
       href: "/",
-      label: companyName ? t(lang, "nav.co", { name: companyName }) : t(lang, "nav.coEmpty"),
+      // 菜單顯示統一轉大寫；companyName 原名仍用於 slug 與其它頁面展示
+      label: companyName ? t(lang, "nav.co", { name: companyName.toUpperCase() }) : t(lang, "nav.coEmpty"),
       // 公司公开页 /<slug> 也归属 Co 这一顶
       active: pathname === "/" || (!!ownSlug && pathname === `/${ownSlug}`),
       icon: IconBuilding,
