@@ -79,7 +79,9 @@ const zh: Dict = {
 
   // —— 消費商店 ——
   "shop.title": "消費商店",
-  "shop.subtitle": "公司帳戶 USD 計價 · 純消費、無經營回報（除了開心）",
+  "shop.subtitle": "個人可支配錢包 USD 計價 · 純消費、無經營回報（除了開心）",
+  "shop.personalBalance": "個人可支配餘額",
+  "shop.lack.personal": "個人餘額不足，請先在 Co 頁 Inject",
   "shop.balance": "帳戶 {bal}",
   "shop.jacket": "Tom Ford 黑色夾克",
   "shop.jacket.desc": "矽谷符號单品。僅可持有 1 件，無數值用途，純玩梗。",
@@ -280,7 +282,9 @@ const en: Dict = {
 
   // —— Shop ——
   "shop.title": "Consumer Shop",
-  "shop.subtitle": "Paid from the company USD balance · pure consumption, zero ROI (except vibes)",
+  "shop.subtitle": "Paid from your personal spendable wallet · pure consumption, zero ROI (except vibes)",
+  "shop.personalBalance": "Your spendable balance",
+  "shop.lack.personal": "Personal balance is short — Inject first on the Co page",
   "shop.balance": "balance {bal}",
   "shop.jacket": "Tom Ford Black Jacket",
   "shop.jacket.desc": "Silicon Valley power dress. Only 1 can be owned; no real use, pure meme.",

@@ -334,8 +334,10 @@ export function memberById(state: GameState, id: string): Member | undefined {
 }
 
 // —— 双池模型：赠金池（grants + lockedWallets）与可支配钱包 ——
-// 赠金（邀请注册 200 USD）与它派生的孳息都**不可提现、不可消费**（buy/topup 只走公司账户），
-// 只能用于出资（成立 / 归队补缴）；分红进钱包时按「赠金出资占比」拆出锁定部分。
+// 赠金（邀请注册 200 USD）与它派生的孳息都**不可提现、不可消费**：
+// 消费通道（buy/topup）只从「当前操作人（activeId）的可支配钱包」扣款，
+// 既不碰公司账户 state.usd，也不碰 grants / lockedWallets 两池。
+// 赠金只能用于出资（成立 / 归队补缴）；分红进钱包时按「赠金出资占比」拆出锁定部分。
 
 /** 未使用的赠金余额（仅限出资） */
 export function grantBalance(state: GameState, id: string): number {
@@ -906,17 +908,21 @@ export function applyAction(state: GameState, action: GameAction): GameState {
     }
 
     case "buy": {
-      // 消费商店：**只**动公司账户 USD（state.usd）。
-      // 赠金池 grants 与锁定池 lockedWallets 不参与任何消费路径（不可提现、不可消费）
-      // 耐用品同时只能持有一件，耐久未耗尽前不可再买
+      // 消费商店：**只**动当前操作人的可支配钱包（wallets − lockedWallets）。
+      // 公司账户 state.usd 一分不动；赠金池 grants 与锁定池 lockedWallets 也不参与。
+      // 余额不足（含只剩锁定部分）⇒ 返回同一引用，服务端映射 400 invalid_action、不写库。
+      // 耐用品同时只能持有一件，耐久未耗尽前不可再买。
       if (!state.org || state.proposal) return state;
       const good = GOODS.find((g) => g.id === action.goodId);
       if (!good) return state;
       if (good.durable && itemHolding(state, good.id)) return state;
-      if (state.usd < good.price) return state;
+      const wallet = state.activeId;
+      if (!memberById(state, wallet)) return state;
+      // 只花可支配部分：spendable = wallets − lockedWallets ≥ price ⇒ 扣后 wallets ≥ locked ≥ 0
+      if (spendableWallet(state, wallet) < good.price) return state;
       let out: GameState = {
         ...state,
-        usd: state.usd - good.price,
+        wallets: { ...state.wallets, [wallet]: (state.wallets[wallet] ?? 0) - good.price },
         purchases: { ...state.purchases, [good.id]: (state.purchases[good.id] ?? 0) + 1 },
         items: good.durable
           ? { ...state.items, [good.id]: { boughtAt: Date.now() } }
@@ -930,7 +936,7 @@ export function applyAction(state: GameState, action: GameAction): GameState {
 
     case "topup": {
       // 手机话费充值：外部实时汇率折算 USD 扣款（reducer 纯函数，汇率由 UI 传入，不依赖网络）
-      // 消费只走公司账户（state.usd），**绝不**触碰 grants / lockedWallets 两池
+      // 扣款来源同 buy：**只扣当前操作人的可支配钱包**，公司账户 state.usd 与 grants / lockedWallets 不动
       if (!state.org || state.proposal) return state;
       const region = TOPUP_REGIONS.find((r) => r.key === action.region);
       if (!region || !region.amounts.includes(action.amount)) return state;
@@ -938,11 +944,13 @@ export function applyAction(state: GameState, action: GameAction): GameState {
       if (!Number.isFinite(usdCost) || usdCost <= 0) return state;
       // 异常上限保护：扣款超过面值 5 倍视为荒谬值，直接拒绝
       if (usdCost > action.amount * 5) return state;
-      if (usdCost > state.usd) return state;
+      const wallet = state.activeId;
+      if (!memberById(state, wallet)) return state;
+      if (usdCost > spendableWallet(state, wallet)) return state;
       const key = `topup:${region.key}:${action.amount}`;
       let out: GameState = {
         ...state,
-        usd: state.usd - usdCost,
+        wallets: { ...state.wallets, [wallet]: (state.wallets[wallet] ?? 0) - usdCost },
         purchases: { ...state.purchases, [key]: (state.purchases[key] ?? 0) + 1 },
       };
       out = pushLog(out, "log.topup", {

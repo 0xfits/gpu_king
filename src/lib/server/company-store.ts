@@ -188,8 +188,8 @@ export async function getCompanySummary(slug: string): Promise<CompanySummary | 
 
 /**
  * 允许经 API 提交的 action（服务端权威：hydrate/tick 一律拒收）。
- * ⚠️ `openGift` **刻意不在此白名单**：礼盒开启必须走 /api/gifts/open（含成员身份校验），
- *    若放进通用 /api/actions（P0 无鉴权），任何人都能替别人开礼盒。
+ * ⚠️ `openGift` **刻意不在此白名单**：礼盒开启必须走 /api/gifts/open（独立的开启语义 +
+ *    幂等校验），不混进通用 /api/actions 的乐观锁写回。
  */
 const ACTION_TYPES = new Set([
   "switch",
@@ -327,8 +327,14 @@ export type ActionOutcome =
 
 /**
  * 乐观锁写入一次玩家操作：
- * 事务 → SELECT ... FOR UPDATE → 结算 → 版本校验 → applyAction → 校验 action 生效 →
- * UPDATE（state_version = expectedVersion + 1）→ 同步 members/logs。
+ * 事务 → **公司存在性(404) → 成员归属(403)** → 结构校验(400) → SELECT ... FOR UPDATE → 结算 →
+ * 版本校验 → applyAction → 校验 action 生效 → UPDATE（state_version = expectedVersion + 1）
+ * → 同步 members/logs。
+ *
+ * 归属安全（P0）：`discordId` 必须是该公司**任一成员位**绑定的账号，否则 403 `not_member`。
+ * 成员位是游戏内角色、不是权限边界 —— 任一绑定用户都能操作整个公司。
+ * 存在性与成员校验都在本事务**第一条写语句之前**判失败 ⇒ 纯读校验，return 后 COMMIT 是空事务、零副作用
+ * （审计顺序：先判存在性再判成员，否则「不存在的公司」会被成员查询误报成 403）。
  *
  * 版本不符：返回 conflict + **库里的最新 state**（不含本次 action 的重放结果）。
  * action 非法 / 阶段不合法（applyAction 返回同一引用）：4xx，不写库。
@@ -337,13 +343,48 @@ export async function applyActionToCompany(
   slug: string,
   rawAction: unknown,
   expectedVersion: number,
+  discordId: string,
 ): Promise<ActionOutcome> {
-  const v = validateAction(rawAction);
-  if (!v.action) return { kind: "error", status: 400, error: "invalid_action", msg: v.error ?? "非法 action" };
-  const action = v.action;
+  // 防御：路由层已 401；这里空 uid 一律按未登录拒绝，绝不退化成「无鉴权」
+  const uid = typeof discordId === "string" ? discordId.trim() : "";
+  if (!uid) {
+    return { kind: "error", status: 401, error: "unauthenticated", msg: "未登录或会话已过期" };
+  }
 
   await ensureSchema();
   return withTx(async (client) => {
+    // 0) 公司存在性：纯读，不存在 ⇒ 404（必须先于成员校验）
+    const exists = await client.query("select 1 as x from companies where id = $1", [slug]);
+    if (!exists.rowCount) {
+      return { kind: "error", status: 404, error: "not_found", msg: `公司 ${slug} 不存在` } as ActionOutcome;
+    }
+
+    // 1) 归属校验：company_members 里任一成员位绑定了该账号即可（纯读，不写库）
+    const mem = await client.query(
+      "select 1 as x from company_members where company_id = $1 and discord_id = $2",
+      [slug, uid],
+    );
+    if (!mem.rowCount) {
+      return {
+        kind: "error",
+        status: 403,
+        error: "not_member",
+        msg: "只有该公司成员可以操作",
+      } as ActionOutcome;
+    }
+
+    // 2) 结构校验（纯函数，不碰库）
+    const v = validateAction(rawAction);
+    if (!v.action) {
+      return {
+        kind: "error",
+        status: 400,
+        error: "invalid_action",
+        msg: v.error ?? "非法 action",
+      } as ActionOutcome;
+    }
+    const action = v.action;
+
     const rows = await client.query<CompanyRow>(
       "select id, name, state, state_version, last_settled_at from companies where id = $1 for update",
       [slug],

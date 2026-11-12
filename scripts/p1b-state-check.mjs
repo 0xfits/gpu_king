@@ -12,7 +12,7 @@
  *   3) recruit（归队补缴）同样优先扣 grants；资金不足 → 返回同一引用
  *   4) 分红拆分：fromGrants=100 / total=200 ⇒ 一半进 lockedWallets
  *   5) openGift：确定性 rng（同输入同输出）、重复开 → 同一引用
- *   6) buy / topup 消费只动公司账户，grants / lockedWallets 两池分毫不动
+ *   6) buy / topup 消费只动「个人可支配钱包」，公司账户 usd 与 grants / lockedWallets 两池分毫不动
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -230,31 +230,45 @@ const missing = g.applyAction(gs, { type: "openGift", giftId: "nope" });
 check("不存在的礼盒 → 同一引用", missing === gs, "ref-equal");
 
 // ————————————————————————————————————————————————————————————————
-// 6) 消费通道只动公司账户，两池分毫不动
+// 6) 消费通道只动「个人可支配钱包」，公司账户与两池分毫不动
 // ————————————————————————————————————————————————————————————————
 const shop = {
   ...g.initialState(31),
   usd: 5000,
   grants: { u1: 200 },
   lockedWallets: { u1: 50 },
-  wallets: { u1: 100 },
+  wallets: { u1: 900 },
   funding: {},
   log: [],
 };
 const bought = g.applyAction(shop, { type: "buy", goodId: "jacket" });
-check("buy 只扣公司账户", eq(bought.usd, 5000 - 800), bought.usd);
+check("buy 只扣个人钱包（900-800）", eq(bought.wallets.u1, 100), bought.wallets);
+check("buy 不动公司账户", eq(bought.usd, 5000), bought.usd);
 check("buy 不动 grants", eq(bought.grants.u1, 200), bought.grants);
 check("buy 不动 lockedWallets", eq(bought.lockedWallets.u1, 50), bought.lockedWallets);
-check("buy 不动 wallets", eq(bought.wallets.u1, 100), bought.wallets);
+check("buy 后 spendableWallet 为 50", eq(g.spendableWallet(bought, "u1"), 50), g.spendableWallet(bought, "u1"));
 
 const topped = g.applyAction(shop, { type: "topup", region: "cn", amount: 100, usdCost: 14, rate: 7 });
-check("topup 只扣公司账户", eq(topped.usd, 5000 - 14), topped.usd);
-check("topup 不动 grants / lockedWallets / wallets", eq(topped.grants.u1, 200) && eq(topped.lockedWallets.u1, 50) && eq(topped.wallets.u1, 100), [
+check("topup 只扣个人钱包（900-14）", eq(topped.wallets.u1, 886), topped.wallets);
+check("topup 不动公司账户 / grants / lockedWallets", eq(topped.usd, 5000) && eq(topped.grants.u1, 200) && eq(topped.lockedWallets.u1, 50), [
+  topped.usd,
   topped.grants,
   topped.lockedWallets,
-  topped.wallets,
 ]);
-check("topup 后 spendableWallet 仍为 50", eq(g.spendableWallet(topped, "u1"), 50), g.spendableWallet(topped, "u1"));
+check("topup 后 spendableWallet 为 836", eq(g.spendableWallet(topped, "u1"), 836), g.spendableWallet(topped, "u1"));
+
+// 余额不足：可支配只有 50（wallets 100 − locked 50），公司账户 5000 也不许动 ⇒ 同一引用
+const shopBroke = { ...shop, wallets: { u1: 100 }, lockedWallets: { u1: 50 } };
+check(
+  "buy 个人余额不足 → 同一引用",
+  g.applyAction(shopBroke, { type: "buy", goodId: "jacket" }) === shopBroke,
+  "ref-equal",
+);
+check(
+  "topup 个人余额不足 → 同一引用",
+  g.applyAction(shopBroke, { type: "topup", region: "cn", amount: 100, usdCost: 60, rate: 7 }) === shopBroke,
+  "ref-equal",
+);
 
 // —— 汇总 ——
 console.log(`\n${n - fails.length}/${n} passed`);

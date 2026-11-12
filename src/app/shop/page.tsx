@@ -10,6 +10,7 @@ import {
   activeMembers,
   itemDurabilityLeft,
   itemHolding,
+  spendableWallet,
   DURABILITY_DAYS,
 } from "../../lib/game";
 import { t } from "../../lib/i18n";
@@ -35,7 +36,9 @@ export default function ShopPage() {
   const { state, lang } = useGame();
   const [topupOpen, setTopupOpen] = useState(false);
 
-  const parts = balanceParts(state.usd);
+  // 商店扣的是**当前操作人的个人可支配钱包**（wallets − lockedWallets），不是公司账户
+  const myBalance = spendableWallet(state, state.activeId);
+  const parts = balanceParts(myBalance);
 
   return (
     <PageBody>
@@ -47,13 +50,21 @@ export default function ShopPage() {
       </div>
       <p style={{ fontSize: 12, color: "#888", margin: "8px 0 0" }}>{t(lang, "shop.subtitle")}</p>
 
-      {/* 公司账户余额 */}
+      {/* 个人可支配钱包余额（商店从个人钱包扣款，不扣公司账户） */}
       <div style={{ ...panel, textAlign: "center", background: "#1a1a1a", borderColor: "#76b900" }}>
+        <div style={{ fontSize: 11, color: "#888", marginBottom: 4 }}>
+          {t(lang, "shop.personalBalance")}
+        </div>
         <div style={{ fontWeight: "bold", color: "#76b900", display: "flex", alignItems: "baseline", justifyContent: "center", gap: 6 }}>
           <IconWallet size={20} />
           <span style={{ fontSize: 22 }}>{parts.whole}</span>{" "}
           <span style={{ fontSize: 13, opacity: 0.75 }}>{parts.pusd}</span>
         </div>
+        {myBalance <= 0 && (
+          <div style={{ fontSize: 10, color: "#fa0", marginTop: 6 }}>
+            {t(lang, "shop.lack.personal")}
+          </div>
+        )}
       </div>
 
       {/* 玩梗商品 */}
@@ -127,7 +138,9 @@ function TopupModal({ onClose }: { onClose: () => void }) {
   const rate = fx.rates[FX_CURRENCIES[regionKey]];
   const usd = usdCostOf(amount, rate);
   const canAct = !!state.org && !state.proposal && activeMembers(state).includes(state.activeId);
-  const short = state.usd < usd;
+  // 扣款来源同商品：个人可支配钱包（wallets − lockedWallets），公司账户不参与
+  const myBalance = spendableWallet(state, state.activeId);
+  const short = myBalance < usd;
   const confirmDisabled = !canAct || short || fx.loading;
 
   // 切地区：当前面值不在新地区 amounts 内 → 自动切到该地区第 2 个面值
@@ -226,7 +239,9 @@ function TopupModal({ onClose }: { onClose: () => void }) {
     if (!short) return null;
     return (
       <div style={{ fontSize: 10, color: "#f55", marginTop: 6 }}>
-        {t(lang, "shop.lack", { n: (usd - state.usd).toFixed(2) })}
+        {t(lang, "shop.lack", { n: (usd - myBalance).toFixed(2) })}
+        {" · "}
+        {t(lang, "shop.lack.personal")}
       </div>
     );
   };
@@ -296,7 +311,9 @@ function GoodRow({ good }: { good: Good }) {
   const holding = good.durable && itemHolding(state, good.id);
   const left = good.durable ? itemDurabilityLeft(state, good.id) : 0;
   const canAct = !!state.org && !state.proposal && activeMembers(state).includes(state.activeId);
-  const affordable = state.usd >= good.price && canAct && !holding;
+  // 商店从个人可支配钱包扣款（wallets − lockedWallets），公司账户 state.usd 不参与
+  const myBalance = spendableWallet(state, state.activeId);
+  const affordable = myBalance >= good.price && canAct && !holding;
   return (
     <div
       style={{
@@ -370,9 +387,11 @@ function GoodRow({ good }: { good: Good }) {
         {holding && (
           <div style={{ fontSize: 10, color: "#8ab4f8", marginTop: 4 }}>{t(lang, "shop.dur", { left, total: DURABILITY_DAYS })}</div>
         )}
-        {!affordable && !holding && state.usd < good.price && (
+        {!affordable && !holding && myBalance < good.price && (
           <div style={{ fontSize: 10, color: "#f55", marginTop: 4 }}>
-            {t(lang, "shop.lack", { n: (good.price - state.usd).toFixed(2) })}
+            {t(lang, "shop.lack", { n: (good.price - myBalance).toFixed(2) })}
+            {" · "}
+            {t(lang, "shop.lack.personal")}
           </div>
         )}
       </div>
