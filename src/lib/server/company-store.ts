@@ -257,9 +257,28 @@ function validateAction(raw: unknown): { action?: GameAction; error?: string } {
   return { action: raw as GameAction };
 }
 
+/**
+ * 事务内写失败信号：`withTx` 只对「回调抛错」ROLLBACK，对「正常返回」一律 COMMIT。
+ * 因此「已经写过东西之后才发现写不下去」的分支必须 throw（下方 catch 映射回 409）。
+ */
+class TxWriteFailed extends Error {
+  constructor(readonly code: string) {
+    super(code);
+    this.name = "TxWriteFailed";
+  }
+}
+
+/**
+ * 同步成员位（`company_members` 是 state.members 的落库镜像）。
+ *
+ * ★ **绝不写 discord_id**：身份只能在「导入 / 入住」时显式绑定一次，写入点是
+ *   `createFromLocal` 与 `joinCompany`。这里是 upsert 的 do update 只保留
+ *   `display_name = excluded.display_name` —— 若这里也跟着写 `discord_id`，
+ *   每次 action 都会把已有身份洗成 null（P1b 之前正是全库 NULL 的成因）。
+ */
 async function syncMembers(client: PoolClient, slug: string, members: Member[]): Promise<void> {
   for (const m of members) {
-    // upsert：保留已有 discord_id（P0 全为 null），只更新显示名
+    // upsert：只更新显示名；discord_id 仅在新行插入时为 null，已有行原样保留
     await client.query(
       `insert into company_members (company_id, member_id, discord_id, display_name)
        values ($1, $2, null, $3)
@@ -271,6 +290,24 @@ async function syncMembers(client: PoolClient, slug: string, members: Member[]):
     `delete from company_members where company_id = $1 and not (member_id = any($2::text[]))`,
     [slug, members.map((m) => m.id)],
   );
+}
+
+/**
+ * 事务内读并锁住「待注入赠金」（`users.grant_usd`）；无该行 ⇒ 0。
+ * 加锁是为了与并发入住/导入串行，避免同一笔赠金被注入两次。
+ */
+async function lockPendingGrant(client: PoolClient, discordId: string): Promise<number> {
+  const r = await client.query<{ grant_usd: string | number }>(
+    "select grant_usd from users where discord_id = $1 for update",
+    [discordId],
+  );
+  const n = Number(r.rows[0]?.grant_usd ?? 0); // numeric 读回是 string
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/** 赠金已写进 `state.grants` ⇒ `users.grant_usd` 归零（同一事务内，紧跟注入写） */
+async function clearPendingGrant(client: PoolClient, discordId: string): Promise<void> {
+  await client.query("update users set grant_usd = $2 where discord_id = $1", [discordId, dec(0)]);
 }
 
 /** 写历史日志（game_logs 表；展示用的 state.log 由 reducer 维护，两处保持同键） */
@@ -383,15 +420,25 @@ export async function applyActionToCompany(
 }
 
 export type ImportOutcome =
-  | { ok: true; slug: string; version: number }
+  | { ok: true; slug: string; version: number; grantedUsd: number; memberId: string }
   | { ok: false; status: number; error: string; msg: string };
 
 /**
- * 把浏览器 localStorage 存档整体搬进 Postgres：
- * 校验结构 → repairState 补齐 → 插 companies + company_members + 最近 40 条 log。
- * slug 冲突（公司已存在）→ 409。
+ * 把浏览器 localStorage 存档整体搬进 Postgres（**要求登录态**，无 session 由路由层 401）：
+ * 校验结构 → repairState 补齐 → （事务内）锁 `users.grant_usd` → 注入 `state.grants[绑定位]` →
+ * 插 companies（带 `owner_discord_id`）→ syncMembers → 该成员位绑 `discord_id` →
+ * `users.grant_usd` 归零 → 最近 40 条 log。以上全在**同一事务**，任一步失败整体回滚。
+ *
+ * 绑定哪一位成员：`state.activeId`（不在册则回退 `members[0]`）。
+ * slug 冲突（公司已存在）→ 409（insert 是本事务第一条写，抛错即回滚，赠金不会被吃掉）。
+ *
+ * @param discordId 当前登录账号的 Discord user id；null/undefined ⇒ 只导入不绑身份
+ *                  （仅供离线迁移脚本用，路由层必须传真实 uid）。
  */
-export async function createFromLocal(input: unknown): Promise<ImportOutcome> {
+export async function createFromLocal(
+  input: unknown,
+  discordId: string | null = null,
+): Promise<ImportOutcome> {
   await ensureSchema();
   const bad = (msg: string, error = "invalid_state", status = 400): ImportOutcome => ({
     ok: false,
@@ -432,23 +479,55 @@ export async function createFromLocal(input: unknown): Promise<ImportOutcome> {
   // 服务端已是权威结算源：置为导入时刻，避免客户端按旧 lastSave 二次结算
   state = { ...state, lastSave: Date.now() };
 
+  const owner = typeof discordId === "string" && discordId !== "" ? discordId : null;
+  // 绑定哪一位成员：activeId 在册优先，否则第一位（导入后的身份归属）
+  const bindMemberId =
+    typeof state.activeId === "string" && state.members.some((m) => m.id === state.activeId)
+      ? state.activeId
+      : state.members[0]!.id;
+
+  let grantedUsd = 0;
   try {
     await withTx(async (client) => {
+      // 0) 赠金：先锁 users 行（纯读），无该行 ⇒ 0。写库前完成，失败可安全 return。
+      grantedUsd = owner ? await lockPendingGrant(client, owner) : 0;
+      const toWrite: GameState =
+        grantedUsd > 0
+          ? {
+              ...state,
+              grants: {
+                ...state.grants,
+                [bindMemberId]: (state.grants[bindMemberId] ?? 0) + grantedUsd,
+              },
+            }
+          : state;
+
+      // 1) 公司行（本事务第一条写；slug 冲突抛 23505 ⇒ 整体回滚，赠金不会被吃掉）
       await client.query(
-        `insert into companies (id, name, usd, dividends, hash, capacity, state, state_version, last_settled_at)
-         values ($1, $2, $3, $4, $5, $6, $7, 1, now())`,
+        `insert into companies (id, name, usd, dividends, hash, capacity, state, state_version, last_settled_at, owner_discord_id)
+         values ($1, $2, $3, $4, $5, $6, $7, 1, now(), $8)`,
         [
           slug,
-          state.org!.name,
-          dec(state.usd),
-          dec(state.dividends),
-          dec(state.hash),
-          dec(state.capacity),
-          JSON.stringify(state),
+          toWrite.org!.name,
+          dec(toWrite.usd),
+          dec(toWrite.dividends),
+          dec(toWrite.hash),
+          dec(toWrite.capacity),
+          JSON.stringify(toWrite),
+          owner,
         ],
       );
-      await syncMembers(client, slug, state.members);
-      await insertLogs(client, slug, state.log.slice(0, 40));
+      await syncMembers(client, slug, toWrite.members);
+      if (owner) {
+        // 2) 身份绑定：syncMembers 刻意不写 discord_id，这里显式落库一次
+        await client.query(
+          "update company_members set discord_id = $2 where company_id = $1 and member_id = $3",
+          [slug, owner, bindMemberId],
+        );
+        // 3) 赠金已进 state.grants ⇒ users.grant_usd 归零（同一事务）
+        if (grantedUsd > 0) await clearPendingGrant(client, owner);
+      }
+      await insertLogs(client, slug, toWrite.log.slice(0, 40));
     });
   } catch (err) {
     if ((err as { code?: string }).code === "23505") {
@@ -456,7 +535,7 @@ export async function createFromLocal(input: unknown): Promise<ImportOutcome> {
     }
     throw err;
   }
-  return { ok: true, slug, version: 1 };
+  return { ok: true, slug, version: 1, grantedUsd, memberId: bindMemberId };
 }
 
 export interface LeaderRow {
@@ -495,7 +574,8 @@ export async function leaderboard(
 
 /**
  * 某 Discord 账号待注入的赠金（`users.grant_usd`）；无该行 → 0。
- * P1c 建公司时用它把赠金写进该成员位的 `state.grants`，**不改 createFromLocal 签名**。
+ * 只读版本（不写库、不加锁）——真实注入走 `createFromLocal` / `joinCompany` 事务内的
+ * `lockPendingGrant`（SELECT ... FOR UPDATE），避免「查完到用之间」被并发吃掉。
  */
 export async function pendingGrantFor(discordId: string): Promise<number> {
   if (typeof discordId !== "string" || discordId === "") return 0;
@@ -639,5 +719,146 @@ export async function openGift(
       companyRep: next.companyRep,
       version: newVersion,
     };
+  });
+}
+
+// —— P1c：入驻（把一个空闲成员位绑定给登录账号 + 赠金注入）——
+
+export type JoinOutcome =
+  | {
+      kind: "ok";
+      /** 绑定的成员位（如 u2） */
+      memberId: string;
+      /** 之前已是该公司成员（幂等：不重复注入赠金） */
+      alreadyMember: boolean;
+      /** 本次注入 `state.grants` 的赠金（USD）；已注入过一次则为 0 */
+      grantedUsd: number;
+      /** 写库后的 state_version */
+      version: number;
+    }
+  | { kind: "error"; status: number; error: string; msg: string };
+
+/**
+ * 让登录账号入住某公司：把该公司**一个 `discord_id is null` 的成员位**绑定给它，
+ * 并把 `users.grant_usd` 注入该位的 `state.grants`（同一事务）。
+ *
+ * 分支（顺序即优先级）：
+ * - 公司不存在 ⇒ `{ kind:"error", status:404, error:"not_found" }`
+ * - 已是成员 ⇒ `{ kind:"ok", memberId, alreadyMember:true }`（幂等，不写库、不再吃赠金）
+ * - 无空位 ⇒ `{ kind:"error", status:409, error:"no_vacancy" }`（纯读校验，零写入）
+ * - 成功 ⇒ `{ kind:"ok", memberId, alreadyMember:false, grantedUsd, version }`
+ *
+ * 锁序与 `applyActionToCompany` 一致（companies 行 → company_members 行 → users 行），
+ * 避免与并发 action / 并发入住互锁。
+ * 写后失败（版本不符）必须 throw 让 withTx ROLLBACK —— 此时身份已落库。
+ */
+export async function joinCompany(slug: string, discordId: string): Promise<JoinOutcome> {
+  const id = typeof slug === "string" ? slug.trim().toLowerCase() : "";
+  if (!id || typeof discordId !== "string" || discordId === "") {
+    return { kind: "error", status: 400, error: "bad_request", msg: "缺少公司 slug 或未登录" };
+  }
+
+  await ensureSchema();
+  return withTx<JoinOutcome>(async (client): Promise<JoinOutcome> => {
+    // 1) 锁公司行（先判存在性：不存在 ⇒ 404，而不是被空位查询误报成 409）
+    const rows = await client.query<CompanyRow>(
+      "select id, name, state, state_version, last_settled_at from companies where id = $1 for update",
+      [id],
+    );
+    const row = rows.rows[0];
+    if (!row) {
+      return { kind: "error", status: 404, error: "not_found", msg: `公司 ${id} 不存在` };
+    }
+
+    // 2) 已是成员 ⇒ 幂等成功（纯读，未写任何东西）
+    const mine = await client.query<{ member_id: string }>(
+      "select member_id from company_members where company_id = $1 and discord_id = $2 order by member_id limit 1",
+      [id, discordId],
+    );
+    if (mine.rows[0]) {
+      return {
+        kind: "ok",
+        memberId: mine.rows[0].member_id,
+        alreadyMember: true,
+        grantedUsd: 0,
+        version: Number(row.state_version),
+      };
+    }
+
+    // 3) 找空位并锁住该成员行；无空位 ⇒ 409（仍是纯读）
+    const vacancy = await client.query<{ member_id: string }>(
+      `select member_id from company_members
+        where company_id = $1 and discord_id is null
+        order by member_id
+        limit 1
+        for update`,
+      [id],
+    );
+    const memberId = vacancy.rows[0]?.member_id;
+    if (!memberId) {
+      return { kind: "error", status: 409, error: "no_vacancy", msg: "该公司没有空缺的成员位" };
+    }
+
+    // 4) 赠金（事务内加锁读；无 users 行 ⇒ 0）
+    const grantedUsd = await lockPendingGrant(client, discordId);
+
+    // 5) 身份绑定 —— 本事务第一条写语句；0 行受影响 ⇒ 什么都没写 ⇒ return 安全
+    const bind = await client.query(
+      `update company_members set discord_id = $3
+        where company_id = $1 and member_id = $2 and discord_id is null`,
+      [id, memberId, discordId],
+    );
+    if (!bind.rowCount) {
+      // 已 for update 锁住该行，理论不可达；此时本事务仍未写入任何数据
+      return { kind: "error", status: 409, error: "no_vacancy", msg: "该成员位刚被占用，请重试" };
+    }
+
+    let version = Number(row.state_version);
+    if (grantedUsd > 0) {
+      const stored = repairState(parseState(row.state));
+      const { state: settled, changed } = settle(stored, row.last_settled_at, Date.now());
+      const now = Date.now();
+      const next: GameState = {
+        ...settled,
+        grants: { ...settled.grants, [memberId]: (settled.grants[memberId] ?? 0) + grantedUsd },
+        lastSave: changed ? settled.lastSave : now,
+      };
+      const newVersion = version + 1;
+      const upd = await client.query(
+        `update companies
+            set state = $1, usd = $2, hash = $3, capacity = $4, dividends = $5,
+                state_version = $6, last_settled_at = now(), updated_at = now()
+          where id = $7 and state_version = $8`,
+        [
+          JSON.stringify(next),
+          dec(next.usd),
+          dec(next.hash),
+          dec(next.capacity),
+          dec(next.dividends),
+          newVersion,
+          id,
+          version,
+        ],
+      );
+      if (!upd.rowCount) {
+        // ★ 必须 throw：身份已在第 5 步写入，return 会被 withTx 当作成功 COMMIT ⇒
+        //   留下「已入住但赠金没进 state」的半截状态。throw ⇒ 整体回滚。
+        throw new TxWriteFailed("join_state_update_failed");
+      }
+      await clearPendingGrant(client, discordId);
+      version = newVersion;
+    }
+
+    return { kind: "ok", memberId, alreadyMember: false, grantedUsd, version };
+  }).catch((err: unknown): JoinOutcome => {
+    if (err instanceof TxWriteFailed) {
+      return {
+        kind: "error",
+        status: 409,
+        error: "conflict",
+        msg: "公司状态刚被其它操作更新，请重试（本次入住已整体回滚，未产生任何写入）",
+      };
+    }
+    throw err;
   });
 }
