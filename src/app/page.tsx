@@ -4,16 +4,12 @@ import { useState, useCallback } from "react";
 import Link from "next/link";
 import {
   INCORPORATION_FEE,
-  YIELD_PER_HASH,
-  HASH_PASSIVE_SCALE,
   DEFAULT_COMPANY_NAME,
   RESERVED_SLUGS,
   slugFromName,
-  marketCap,
   annualYield,
   usdPerSec,
   hashPerSec,
-  activeMembers,
   balanceParts,
   buildUsdBoard,
   buildHashBoard,
@@ -24,6 +20,7 @@ import { t, memberLabel } from "../lib/i18n";
 import { useGame } from "../lib/game-context";
 import { RepBars } from "../components/rep-bars";
 import { LogFeed } from "../components/log-feed";
+import { CompanyRepPanel, GpuGenerations, Shareholders } from "../components/company-sections";
 import { panel, badge, voteBtn, iconBtn } from "../components/ui";
 import { PageBody, SectionTitle } from "../components/shell";
 import {
@@ -39,17 +36,20 @@ import {
   IconBuilding,
 } from "../components/icons";
 
-export default function HomePage() {
+/**
+ * Co 页（公司中心页，路由 /）板块顺序固定：
+ * 命名 → 个人账户与声望 → 公司余额 → GPU 世代 → 股东 → 公司详情 → 全球排行 → 公司动态
+ * GPU / 股东两块与 /<slug> 公开页共用 company-sections.tsx。
+ */
+export default function CoPage() {
   const { state, dispatch, lang, flash, pulse } = useGame();
   const [nameInput, setNameInput] = useState("");
   const [nameErr, setNameErr] = useState("");
   const [copied, setCopied] = useState(false);
 
   const orgMembers = state.org?.members ?? [];
-  const crew = activeMembers(state);
   const active = memberById(state, state.activeId);
   const inOrg = (id: string) => orgMembers.includes(id) && id !== "";
-  const mcap = marketCap(state);
   const companyName = state.org?.name ?? "";
   const needsNaming = !!state.org && companyName === DEFAULT_COMPANY_NAME;
   const named = !!state.org && companyName !== DEFAULT_COMPANY_NAME;
@@ -111,7 +111,7 @@ export default function HomePage() {
 
   return (
     <PageBody>
-      {/* 命名面板 */}
+      {/* ============ 1) 命名面板 ============ */}
       {(needsNaming || !state.org) && (
         <div style={{ ...panel, marginTop: 12, borderColor: "#76b900" }}>
           <div style={{ fontSize: 13, fontWeight: "bold", marginBottom: 6 }}>
@@ -161,7 +161,7 @@ export default function HomePage() {
         </div>
       )}
 
-      {/* ============ 个人区 ============ */}
+      {/* ============ 2) 个人账户与声望 ============ */}
       <SectionTitle icon={<IconUser size={13} />} text={t(lang, "section.personal")} />
       <div style={{ display: "flex", gap: 10, marginTop: 8, alignItems: "stretch", flexWrap: "wrap" }}>
         <a
@@ -194,9 +194,8 @@ export default function HomePage() {
         )}
       </div>
 
-      {/* 公司区：USD 余额 + HASH 余额 + 双榜 */}
-      <SectionTitle icon={<IconBuilding size={13} />} text={t(lang, "section.company")} />
-
+      {/* ============ 3) 公司余额 ============ */}
+      <SectionTitle icon={<IconBuilding size={13} />} text={t(lang, "section.companyBalance")} />
       <div style={{ display: "flex", gap: 10, marginTop: 8, flexWrap: "wrap" }}>
         {/* 公司 USD 余额 */}
         <div
@@ -223,7 +222,7 @@ export default function HomePage() {
           </div>
         </div>
 
-        {/* HASH 余额：点击挖矿 + 捐赠入口 */}
+        {/* HASH 余额：点击挖矿 + 公开捐赠入口 */}
         <div
           style={{
             flex: "1 1 220px",
@@ -240,8 +239,8 @@ export default function HomePage() {
           onClick={inOrg(state.activeId) ? mine : undefined}
         >
           <a
-            href="/donate"
-            title={t(lang, "donate.title")}
+            href="/public"
+            title={t(lang, "public.title")}
             onClick={(e) => e.stopPropagation()}
             style={{ position: "absolute", right: 8, top: 8, ...iconBtn(flash ? "#76b900" : "#1c2418", flash ? "#000" : "#76b900", 32), textDecoration: "none", border: "1px solid #3a3a3a" }}
           >
@@ -259,11 +258,25 @@ export default function HomePage() {
             #{hashBoard.myRank} / {hashBoard.rows.length}
           </div>
         </div>
+        {/* Inject / Withdraw 按钮下一批加（需提案投票） */}
       </div>
 
-      {/* 公司经营入口 */}
-      {named && (
-        <div style={{ ...panel, marginTop: 10, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+      {/* 公司声望 · 品牌 */}
+      <CompanyRepPanel />
+
+      {/* ============ 4) GPU 世代（经营） ============ */}
+      <SectionTitle icon={<IconPickaxe size={13} />} text={t(lang, "section.gpuGenerations")} />
+      <GpuGenerations />
+
+      {/* ============ 5) 股东 ============ */}
+      <SectionTitle icon={<IconUser size={13} />} text={t(lang, "section.shareholders")} />
+      <Shareholders />
+
+      {/* ============ 6) 公司详情 ============ */}
+      <SectionTitle icon={<IconGlobe size={13} />} text={t(lang, "section.companyDetail")} />
+      {named ? (
+        <div style={{ ...panel, marginTop: 8, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <span style={{ fontWeight: "bold", fontSize: 13, color: "#e0e0e0" }}>「{companyName}」</span>
           <span style={{ fontSize: 11, color: "#888", display: "inline-flex", alignItems: "center", gap: 5 }}>
             <IconGlobe size={12} /> {t(lang, "home.addr")}
           </span>
@@ -280,29 +293,21 @@ export default function HomePage() {
             href={`/${slug}`}
             style={{ ...badge, color: "#76b900", textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 4, marginLeft: "auto" }}
           >
-            <IconGlasses size={11} /> {t(lang, "nav.company")} · {t(lang, "companyPage.title")}
+            <IconGlasses size={11} /> {t(lang, "companyPage.title")}
           </Link>
+          {/* 分享按钮位置预留：navigator.share / 复制邀请链接 ?invite=1（本轮不实现） */}
         </div>
+      ) : (
+        <p style={{ fontSize: 11, color: "#666", margin: "8px 0 0" }}>{t(lang, "companyDetail.empty")}</p>
       )}
 
-      {/* ============ 双榜：单卡双 tab ============ */}
+      {/* ============ 7) 全球排行 ============ */}
       <SectionTitle icon={<IconTrophy size={13} />} text={t(lang, "rank.title")} />
       <div style={{ display: "flex", marginTop: 8 }}>
         <BoardTabs usdRows={usdBoard.rows} hashRows={hashBoard.rows} />
       </div>
 
-      {crew.length < 3 && state.org && (
-        <Link
-          href={`/${slug}`}
-          style={{ display: "flex", ...panel, marginTop: 10, borderColor: "#fa0", textDecoration: "none", alignItems: "center", gap: 8 }}
-        >
-          <span style={{ fontSize: 12, color: "#fa0", fontWeight: "bold" }}>
-            {t(lang, "staff.short", { name: companyName, n: crew.length, size: 3 })}
-          </span>
-          <span style={{ fontSize: 11, color: "#76b900", marginLeft: "auto" }}>{t(lang, "staff.goCompany")}</span>
-        </Link>
-      )}
-
+      {/* ============ 8) 公司动态 ============ */}
       <LogFeed state={state} lang={lang} />
     </PageBody>
   );

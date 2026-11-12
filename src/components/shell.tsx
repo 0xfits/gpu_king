@@ -12,30 +12,18 @@ import {
   IconHeartHandshake,
   IconWallet,
   IconZap,
-  IconGlobe,
 } from "./icons";
 import { badge, voteBtn } from "./ui";
 
-const NAV: { href: string; labelKey: string; icon: (p: { size?: number }) => React.ReactElement }[] = [
-  { href: "/", labelKey: "nav.home", icon: IconBuilding },
-  { href: "/donate", labelKey: "donate.title", icon: IconHeartHandshake },
-  { href: "/shop", labelKey: "shop.title", icon: IconShoppingCart },
-];
-
-function NavLink({
-  href,
-  labelKey,
-  label,
-  icon: Icon,
-}: {
+/** 单个导航项：标签一律由调用方算好（Co 项要带公司名） */
+interface NavItem {
   href: string;
-  labelKey: string;
-  label?: string;
+  label: string;
+  active: boolean;
   icon: (p: { size?: number }) => React.ReactElement;
-}) {
-  const { lang } = useGame();
-  const pathname = usePathname();
-  const active = href === "/" ? pathname === "/" : pathname === href;
+}
+
+function NavLink({ href, label, active, icon: Icon }: NavItem) {
   return (
     <Link
       href={href}
@@ -51,17 +39,44 @@ function NavLink({
       }}
     >
       <Icon size={13} />
-      {label ?? t(lang, labelKey)}
+      {label}
     </Link>
   );
 }
 
-/** 公共页眉：品牌 + 全局资源条 + 导航 + 语言切换 */
+/** 公共页眉：品牌 + 全局资源条 + 导航（Co / Public / Shop）+ 语言切换 */
 export function AppHeader() {
   const { state, lang, setLang } = useGame();
   const pathname = usePathname();
   const parts = balanceParts(state.usd);
   const yieldNow = annualYield(state);
+
+  const companyName =
+    state.org && state.org.name !== DEFAULT_COMPANY_NAME ? state.org.name : "";
+  const ownSlug = companyName ? slugFromName(companyName) : "";
+
+  /** 三顶固定顺序：Co（公司中心页）/ Public（算力捐赠）/ Shop */
+  const NAV: NavItem[] = [
+    {
+      href: "/",
+      label: companyName ? t(lang, "nav.co", { name: companyName }) : t(lang, "nav.coEmpty"),
+      // 公司公开页 /<slug> 也归属 Co 这一顶
+      active: pathname === "/" || (!!ownSlug && pathname === `/${ownSlug}`),
+      icon: IconBuilding,
+    },
+    {
+      href: "/public",
+      label: t(lang, "nav.public"),
+      active: pathname === "/public",
+      icon: IconHeartHandshake,
+    },
+    {
+      href: "/shop",
+      label: t(lang, "nav.shop"),
+      active: pathname === "/shop",
+      icon: IconShoppingCart,
+    },
+  ];
 
   return (
     <header style={{ borderBottom: "1px solid #222", background: "#101010" }}>
@@ -108,14 +123,6 @@ export function AppHeader() {
           {NAV.map((item) => (
             <NavLink key={item.href} {...item} />
           ))}
-          {state.org && state.org.name !== DEFAULT_COMPANY_NAME && (
-            <NavLink
-              href={`/${slugFromName(state.org.name)}`}
-              labelKey="nav.company"
-              label={`/${slugFromName(state.org.name)}`}
-              icon={IconGlobe}
-            />
-          )}
         </nav>
       </div>
     </header>

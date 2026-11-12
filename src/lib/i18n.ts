@@ -31,7 +31,7 @@ const zh: Dict = {
   "header.nameOk":
     "僅允許字母 A-Z a-z 與數字 0-9，空格/中文/符號/底線都會被拒絕",
   "header.errChars": "僅允許字母+數字，1~20 位，不能有空格或符號",
-  "header.errReserved": "donate / shop 是保留路徑，請換個名字",
+  "header.errReserved": "public / shop / donate 是保留路徑，請換個名字",
   "header.errEmpty": "請輸入公司名",
   "header.foundBtn": "成立（-{fee} USD）",
   "header.renameBtn": "命名",
@@ -58,7 +58,8 @@ const zh: Dict = {
   "wallet.enterShop": "商店",
   "wallet.enterDonate": "捐贈",
 
-  // —— 捐贈頁 ——
+  // —— 捐贈頁（路由 /public）——
+  "public.title": "算力捐贈",
   "donate.title": "算力捐贈",
   "donate.subtitle":
     "向社會各界捐贈 HASH 算力，換取該領域聲望 · 價格隨累計捐贈次數成長 · 受益人：當前操作成員",
@@ -155,6 +156,11 @@ const zh: Dict = {
   "lang.switch": "語言",
   "nav.home": "首頁",
   "nav.company": "公司",
+  // —— 導航三頂（固定英文標籤，兩語一致，避免命名漂移）——
+  "nav.co": "Co: {name}",
+  "nav.coEmpty": "Co",
+  "nav.public": "Public",
+  "nav.shop": "Shop",
   "home.addr": "公司地址",
   "home.copy": "複製",
   "home.copied": "已複製",
@@ -175,6 +181,15 @@ const zh: Dict = {
   "staff.goCompany": "→ 到公司頁補位",
   "section.personal": "個人賬戶與聲望",
   "section.company": "公司賬戶與經營",
+  "section.companyBalance": "公司餘額",
+  "section.gpuGenerations": "GPU 代際 · 經營",
+  "section.shareholders": "股東",
+  "section.companyDetail": "公司詳情",
+  "companyDetail.empty": "尚未成立公司 · 請先在上方命名",
+  "companyPage.publicOnly":
+    "這是「{name}」的公開頁面 · 只讀，操作請回 Co 頁",
+  "companyPage.backToCo": "← 返回 Co 頁",
+  "companyPage.readOnlyAction": "公開頁只讀 · 需在 Co 頁操作",
   "companyRep.title": "公司聲望 · 品牌",
   "companyRep.link":
     "關聯規則：個人捐贈時公司同域 +½（向上取整）；擴產成功 工廠/AI 各 +2；擴產失敗照扣 HASH，且 工廠 -5 · 媒體 -2；罷免鬧翻 公司媒體 -3；擴產成功率 = 個人綜合 70% + 品牌綜合 30%；新人起始聲望隨品牌浮動",
@@ -217,7 +232,7 @@ const en: Dict = {
   "header.nameOk":
     "Strict: only A-Z a-z and 0-9. Spaces, CJK, symbols, underscores are rejected",
   "header.errChars": "Letters + digits only, 1-20 chars, no spaces or symbols",
-  "header.errReserved": "donate / shop are reserved paths — pick another name",
+  "header.errReserved": "public / shop / donate are reserved paths — pick another name",
   "header.errEmpty": "Enter a company name",
   "header.foundBtn": "Found (-{fee} USD)",
   "header.renameBtn": "Name it",
@@ -244,7 +259,8 @@ const en: Dict = {
   "wallet.enterShop": "Shop",
   "wallet.enterDonate": "Donate",
 
-  // —— Donations ——
+  // —— Donations page (route /public) ——
+  "public.title": "Hash Donations",
   "donate.title": "Hash Donations",
   "donate.subtitle":
     "Give HASH to the community for reputation in that domain · prices scale with donations · beneficiary: the active member",
@@ -341,6 +357,11 @@ const en: Dict = {
   "lang.switch": "Language",
   "nav.home": "Home",
   "nav.company": "Company",
+  // —— top nav (fixed English labels in both languages) ——
+  "nav.co": "Co: {name}",
+  "nav.coEmpty": "Co",
+  "nav.public": "Public",
+  "nav.shop": "Shop",
   "home.addr": "Company address",
   "home.copy": "Copy",
   "home.copied": "Copied",
@@ -361,6 +382,15 @@ const en: Dict = {
   "staff.goCompany": "→ open the company page to refill the seat",
   "section.personal": "Personal account & reputation",
   "section.company": "Company account & operations",
+  "section.companyBalance": "Company balance",
+  "section.gpuGenerations": "GPU generations (operations)",
+  "section.shareholders": "Shareholders",
+  "section.companyDetail": "Company detail",
+  "companyDetail.empty": "No company yet — name one above",
+  "companyPage.publicOnly":
+    'This is the public page for "{name}" · read only — operate from your Co page',
+  "companyPage.backToCo": "← Back to my Co page",
+  "companyPage.readOnlyAction": "Public page is read-only — operate from your Co page",
   "companyRep.title": "Company reputation · brand",
   "companyRep.link":
     "Linkage: donations also give the brand half the rep (round up); expansion success boosts brand Fab/AI Co +2 each; expansion failure burns the HASH budget and hits brand Fab -5 · Media -2; a hostile recall dents brand Media -3; success chance = personal 70% + brand 30%; newcomers' starting rep scales with the brand",

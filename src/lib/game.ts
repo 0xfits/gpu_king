@@ -193,8 +193,8 @@ export type Org = { name: string; members: string[] } | null;
 
 /** 公司命名：仅允许字母+数字，1~20 位，严格拒绝其它字符 */
 export const COMPANY_NAME_RE = /^[A-Za-z0-9]{1,20}$/;
-/** 保留路径：公司名不能与静态路由冲突，保证 /<slug> 地址可用 */
-export const RESERVED_SLUGS = new Set(["donate", "shop"]);
+/** 保留路径：公司名不能与静态路由冲突，保证 /<slug> 地址可用（donate 保留仅为旧链接重定向） */
+export const RESERVED_SLUGS = new Set(["public", "shop", "donate"]);
 /** 公司网络地址 slug：命名后即为固定地址 /<slug> */
 export function slugFromName(name: string): string {
   return name.toLowerCase();

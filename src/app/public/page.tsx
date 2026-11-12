@@ -32,7 +32,8 @@ const DONATE_ICONS: Record<string, (p: { size?: number }) => React.ReactElement>
 
 const badgeTone = (n: number): string => (n >= 70 ? "#76b900" : n >= 40 ? "#fa0" : "#f55");
 
-export default function DonatePage() {
+/** Public 页（原 /donate，现路由 /public）：算力捐赠，导航第二顶 */
+export default function PublicPage() {
   const { state, dispatch, lang } = useGame();
   const active = memberById(state, state.activeId);
   const nameOf = (id: string) => memberLabel(lang, memberById(state, id)?.name ?? id);
@@ -44,7 +45,7 @@ export default function DonatePage() {
         <span style={{ ...iconBtn("#1c2418", "#76b900", 34) }}>
           <IconHeartHandshake size={18} />
         </span>
-        <h2 style={{ color: "#76b900", margin: 0, fontSize: 18 }}>{t(lang, "donate.title")}</h2>
+        <h2 style={{ color: "#76b900", margin: 0, fontSize: 18 }}>{t(lang, "public.title")}</h2>
       </div>
       <p style={{ fontSize: 12, color: "#888", margin: "8px 0 0" }}>{t(lang, "donate.subtitle")}</p>
 
@@ -104,7 +105,8 @@ export default function DonatePage() {
                   </span>
                   <span style={{ color: "#8ab4f8", display: "inline-flex", alignItems: "center", gap: 3 }}>
                     <IconBuilding size={9} />
-                    {t(lang, "donate.companyNow", { v: companyVal })}
+                    {t(lang, "donate.companyNow", { v: companyVal })}{" "}
+                    <span style={{ color: "#555" }}>{t(lang, domainLabel)}</span>
                   </span>
                   {times > 0 && <span style={{ color: "#76b900" }}>{t(lang, "donate.times", { n: times })}</span>}
                 </div>
