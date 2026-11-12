@@ -11,8 +11,9 @@ import { t, memberLabel } from "../../lib/i18n";
 import { useGame } from "../../lib/game-context";
 import { RepBars } from "../../components/rep-bars";
 import { LogFeed } from "../../components/log-feed";
+import { Leaderboard } from "../../components/leaderboard";
 import { panel, badge, iconBtn } from "../../components/ui";
-import { PageBody } from "../../components/shell";
+import { PageBody, SectionTitle } from "../../components/shell";
 import {
   IconHeartHandshake,
   IconPickaxe,
@@ -21,6 +22,7 @@ import {
   IconSnowflake,
   IconMegaphone,
   IconBuilding,
+  IconTrophy,
 } from "../../components/icons";
 
 const DONATE_ICONS: Record<string, (p: { size?: number }) => React.ReactElement> = {
@@ -151,6 +153,10 @@ export default function PublicPage() {
         <RepBars rep={state.companyRep} lang={lang} height={48} />
         <p style={{ fontSize: 10, color: "#666", margin: "6px 0 0" }}>{t(lang, "companyRep.link")}</p>
       </div>
+
+      {/* 全网公司排名（自 Co 页迁入） */}
+      <SectionTitle icon={<IconTrophy size={13} />} text={t(lang, "rank.title")} />
+      <Leaderboard />
 
       <LogFeed state={state} lang={lang} />
     </PageBody>
