@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { annualYield, balanceParts, slugFromName, DEFAULT_COMPANY_NAME } from "../lib/game";
+import { annualYield, balanceParts, slugFromName, DEFAULT_COMPANY_NAME, companyDisplayName } from "../lib/game";
 import { Lang, LANGS, t } from "../lib/i18n";
 import { useGame } from "../lib/game-context";
 import {
@@ -86,7 +86,7 @@ export function AppHeader() {
           <h1 style={{ color: "#76b900", margin: 0, fontSize: 20, display: "flex", alignItems: "center", gap: 8 }}>
             <IconBuilding size={19} />
             GPU_King
-            {state.org && <span style={{ fontSize: 14, color: "#e0e0e0" }}>「{state.org.name}」</span>}
+            {state.org && <span style={{ fontSize: 14, color: "#e0e0e0" }}>「{companyDisplayName(state.org)}」</span>}
           </h1>
           <div style={{ display: "flex", gap: 4 }}>
             {LANGS.map((l) => (

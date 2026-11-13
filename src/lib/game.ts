@@ -189,18 +189,55 @@ export interface GiftBox {
   from?: string;
 }
 
-export type Org = { name: string; members: string[] } | null;
+export type Org = {
+  /** 简称（同时决定 slug）：字母在前、数字在后，1~6 位 */
+  name: string;
+  /** 公司全称（可选，仅展示用）：1~24 字符，中英文皆可、可含空格；不影响 slug */
+  fullName?: string;
+  members: string[];
+} | null;
 
-/** 公司命名：仅允许字母+数字，1~20 位，严格拒绝其它字符 */
-export const COMPANY_NAME_RE = /^[A-Za-z0-9]{1,20}$/;
+/**
+ * 公司简称：**字母在前、数字在后**，总长 1~6（含数字）。
+ * 合法：`DRAGON` / `GPU1` / `AB12` / `A`；
+ * 非法：`AB12AB`（数字后又字母）/ `123ABC`（数字开头）/ `GPU_1`（符号）/ `SEVENXX`（7 位）。
+ */
+export const COMPANY_NAME_RE = /^(?=.{1,6}$)[A-Za-z]+[0-9]*$/;
+/** 简称最大长度（也是 slug 长度上限） */
+export const COMPANY_NAME_MAX = 6;
+/** 全称最大长度（trim 后按字符计；中文为 BMP 单码元，与字符数一致） */
+export const COMPANY_FULLNAME_MAX = 24;
+/**
+ * 全称允许集（中英文双语界面）：英文字母 / 中文（CJK 基本区）/ 数字 / 空格
+ * 与 `- . & ' （） ( )`，长度 1~24（trim 后计，见 isValidCompanyFullName）。
+ * 尖括号、引号、反斜杠、控制字符不在白名单内 ⇒ `<script>` 天然被拒。
+ */
+export const COMPANY_FULLNAME_RE = /^[A-Za-z0-9\u4e00-\u9fa5 （）().&'-]{1,24}$/;
 /** 保留路径：公司名不能与静态路由冲突，保证 /<slug> 地址可用（donate 保留仅为旧链接重定向） */
 export const RESERVED_SLUGS = new Set(["public", "shop", "donate"]);
-/** 公司网络地址 slug：命名后即为固定地址 /<slug> */
+/** 公司网络地址 slug：命名后即为固定地址 /<slug>，**只由简称生成**，不因全称变化 */
 export function slugFromName(name: string): string {
   return name.toLowerCase();
 }
 export function isValidCompanyName(name: string): boolean {
   return COMPANY_NAME_RE.test(name) && !RESERVED_SLUGS.has(slugFromName(name));
+}
+/** 全称校验：trim 后 1~24 字符，中英文/数字/空格与 - . & ' （）()；拒绝控制字符与 < > 等符号 */
+export function isValidCompanyFullName(fullName: string): boolean {
+  const s = fullName.trim();
+  if (!s) return false;
+  return COMPANY_FULLNAME_RE.test(s);
+}
+/** 归一化全称：非字符串或空串（含全空白）⇒ undefined（视为「未填」），不抛错 */
+export function normalizeCompanyFullName(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const s = raw.trim();
+  return s ? s : undefined;
+}
+/** 展示口径：有全称用全称，否则回退简称。菜单另行用简称大写（见 shell.tsx） */
+export function companyDisplayName(org: Org): string {
+  if (!org) return "";
+  return normalizeCompanyFullName(org.fullName) ?? org.name;
 }
 export const DEFAULT_COMPANY_NAME = "GPU1";
 
@@ -279,8 +316,8 @@ export type GameAction =
   | { type: "kick"; targetId: string }
   | { type: "quit" }
   | { type: "recruit"; memberId: string }
-  | { type: "found"; name: string }
-  | { type: "rename"; name: string }
+  | { type: "found"; name: string; fullName?: string }
+  | { type: "rename"; name: string; fullName?: string }
   | { type: "donate"; donationId: string }
   | { type: "buy"; goodId: string }
   | { type: "topup"; region: TopupRegion; amount: number; usdCost: number; rate: number }
@@ -654,7 +691,7 @@ function removeMember(state: GameState, memberId: string, kicked: boolean): Game
     wallets,
     lockedWallets,
     dividends: Math.max(0, state.dividends - payout.dividend),
-    org: dissolved || !state.org ? null : { name: state.org.name, members },
+    org: dissolved || !state.org ? null : { ...state.org, members },
     activeId: members.includes(state.activeId) ? state.activeId : (members.find((id) => id) ?? ""),
     members: kicked
       ? state.members.map((m) =>
@@ -824,11 +861,14 @@ export function applyAction(state: GameState, action: GameAction): GameState {
     }
 
     case "found": {
-      // 重新成立公司：命名严格校验（字母+数字），缴注册费 100，分红池重置。
+      // 重新成立公司：简称严格校验（1~6 位、字母在前数字在后），缴注册费 100，分红池重置。
       // 创始人重新出资：每人 SEED_MONEY，**优先扣赠金池 grants，不足再扣个人钱包**，
       // 实付累加进 funding（fromGrants 只记赠金部分），并注入公司账户
       if (state.org) return state;
       if (!isValidCompanyName(action.name)) return state;
+      const fullName = normalizeCompanyFullName(action.fullName);
+      // 给了全称就必须合法（空白串视为未给）；未给则用简称
+      if (fullName !== undefined && !isValidCompanyFullName(fullName)) return state;
       const idle = state.members.filter((m) => !isInOrg(state, m.id));
       if (idle.length === 0) return state;
       if (state.usd < INCORPORATION_FEE) return state;
@@ -844,7 +884,7 @@ export function applyAction(state: GameState, action: GameAction): GameState {
         lockedWallets: pools.lockedWallets,
         funding: pools.funding,
         dividends: 0,
-        org: { name: action.name, members: crew },
+        org: { name: action.name, fullName: fullName ?? action.name, members: crew },
         activeId: crew[0],
         members: state.members.map((m) =>
           crew.includes(m.id) ? { ...m, contribution: 0 } : m,
@@ -863,7 +903,12 @@ export function applyAction(state: GameState, action: GameAction): GameState {
       // 首局开局命名：仅当公司仍为默认名时允许改一次
       if (!state.org || state.org.name !== DEFAULT_COMPANY_NAME) return state;
       if (!isValidCompanyName(action.name)) return state;
-      let out: GameState = { ...state, org: { ...state.org, name: action.name } };
+      const fullName = normalizeCompanyFullName(action.fullName);
+      if (fullName !== undefined && !isValidCompanyFullName(fullName)) return state;
+      let out: GameState = {
+        ...state,
+        org: { ...state.org, name: action.name, fullName: fullName ?? state.org.fullName ?? action.name },
+      };
       out = pushLog(out, "log.rename", { name: action.name });
       return out;
     }
@@ -1232,7 +1277,12 @@ export function repairState(state: GameState): GameState {
     gifts: giftList(state.gifts),
     funding: fundingMap(state.funding),
     org: state.org
-      ? { name: state.org.name || DEFAULT_COMPANY_NAME, members: state.org.members }
+      ? {
+          name: state.org.name || DEFAULT_COMPANY_NAME,
+          // 旧存档无 fullName ⇒ undefined（视为未填），展示时回退简称，绝不报错
+          fullName: normalizeCompanyFullName(state.org.fullName),
+          members: state.org.members,
+        }
       : state.org,
     log: (state.log ?? []).filter((l) => typeof l.k === "string"),
   };

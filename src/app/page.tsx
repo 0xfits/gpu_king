@@ -7,6 +7,11 @@ import {
   DEFAULT_COMPANY_NAME,
   RESERVED_SLUGS,
   slugFromName,
+  isValidCompanyName,
+  isValidCompanyFullName,
+  companyDisplayName,
+  COMPANY_NAME_MAX,
+  COMPANY_FULLNAME_MAX,
   annualYield,
   usdPerSec,
   hashPerSec,
@@ -43,7 +48,7 @@ import {
 export default function CoPage() {
   const { state, dispatch, lang, flash, pulse } = useGame();
   const [nameInput, setNameInput] = useState("");
-  const [nameErr, setNameErr] = useState("");
+  const [fullInput, setFullInput] = useState("");
   const [copied, setCopied] = useState(false);
 
   const orgMembers = state.org?.members ?? [];
@@ -66,37 +71,40 @@ export default function CoPage() {
     pulse();
   }, [dispatch, pulse]);
 
-  const checkName = (): string | null => {
-    const name = nameInput.trim();
-    if (!name) {
-      setNameErr(t(lang, "header.errEmpty"));
-      return null;
-    }
-    if (!/^[A-Za-z0-9]{1,20}$/.test(name)) {
-      setNameErr(t(lang, "header.errChars"));
-      return null;
-    }
-    if (RESERVED_SLUGS.has(slugFromName(name))) {
-      setNameErr(t(lang, "header.errReserved"));
-      return null;
-    }
-    setNameErr("");
-    return name;
+  // 实时校验：输入即时算错误，不再等提交（空输入不报错，只禁用按钮）
+  const nameProblem = (raw: string): string => {
+    const s = raw.trim();
+    if (!s) return "";
+    if (isValidCompanyName(s)) return "";
+    return RESERVED_SLUGS.has(slugFromName(s))
+      ? t(lang, "header.errReserved")
+      : t(lang, "header.errChars");
+  };
+  const fullProblem = (raw: string): string => {
+    const s = raw.trim();
+    if (!s || isValidCompanyFullName(s)) return "";
+    return t(lang, "header.errFullName");
+  };
+  const nameErr = nameProblem(nameInput);
+  const fullErr = fullProblem(fullInput);
+  const trimmedName = nameInput.trim();
+  const canName =
+    !!trimmedName &&
+    !nameErr &&
+    !fullErr &&
+    !state.proposal &&
+    (!!state.org || state.usd >= INCORPORATION_FEE);
+
+  const submitName = () => {
+    if (!canName) return;
+    const name = trimmedName;
+    const fullName = fullInput.trim() || undefined;
+    dispatch(state.org ? { type: "rename", name, fullName } : { type: "found", name, fullName });
+    setNameInput("");
+    setFullInput("");
   };
 
-  const submitFound = () => {
-    const name = checkName();
-    if (!name) return;
-    dispatch({ type: "found", name });
-    setNameInput("");
-  };
-
-  const submitRename = () => {
-    const name = checkName();
-    if (!name) return;
-    dispatch({ type: "rename", name });
-    setNameInput("");
-  };
+  const displayName = companyDisplayName(state.org);
 
   const copyAddr = async () => {
     try {
@@ -116,43 +124,60 @@ export default function CoPage() {
           <div style={{ fontSize: 13, fontWeight: "bold", marginBottom: 6 }}>
             {t(lang, state.org ? "header.nameOnce" : "header.nameNew")}
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <input
-              value={nameInput}
-              onChange={(e) => {
-                setNameInput(e.target.value);
-                if (nameErr) setNameErr("");
-              }}
-              placeholder={t(lang, "header.placeholder")}
-              maxLength={20}
-              style={{
-                flex: 1,
-                padding: "8px 10px",
-                background: "#0d0d0d",
-                border: nameErr ? "1px solid #f55" : "1px solid #333",
-                borderRadius: 8,
-                color: "#e0e0e0",
-                fontSize: 13,
-                outline: "none",
-              }}
-            />
-            <button
-              onClick={state.org ? submitRename : submitFound}
-              disabled={
-                !nameInput.trim() ||
-                !!state.proposal ||
-                (!state.org && state.usd < INCORPORATION_FEE)
-              }
-              style={voteBtn("#76b900", "#000")}
-            >
-              {state.org
-                ? t(lang, "header.renameBtn")
-                : t(lang, "header.foundBtn", { fee: INCORPORATION_FEE })}
-            </button>
-          </div>
-          {nameErr ? (
+          {/* 简称：字母在前、数字在后，1~6 位，决定 slug */}
+          <div style={{ fontSize: 10, color: "#888", marginTop: 4 }}>{t(lang, "header.nameLabel")}</div>
+          <input
+            value={nameInput}
+            onChange={(e) => setNameInput(e.target.value)}
+            placeholder={t(lang, "header.placeholder")}
+            maxLength={COMPANY_NAME_MAX}
+            aria-label={t(lang, "header.nameLabel")}
+            style={{
+              width: "100%",
+              boxSizing: "border-box",
+              marginTop: 4,
+              padding: "8px 10px",
+              background: "#0d0d0d",
+              border: nameErr ? "1px solid #f55" : "1px solid #333",
+              borderRadius: 8,
+              color: "#e0e0e0",
+              fontSize: 13,
+              outline: "none",
+            }}
+          />
+          {/* 全称：可选，仅展示用，不影响 slug */}
+          <div style={{ fontSize: 10, color: "#888", marginTop: 8 }}>{t(lang, "header.fullName")}</div>
+          <input
+            value={fullInput}
+            onChange={(e) => setFullInput(e.target.value)}
+            placeholder={t(lang, "header.fullNamePlaceholder")}
+            maxLength={COMPANY_FULLNAME_MAX}
+            aria-label={t(lang, "header.fullName")}
+            style={{
+              width: "100%",
+              boxSizing: "border-box",
+              marginTop: 4,
+              padding: "8px 10px",
+              background: "#0d0d0d",
+              border: fullErr ? "1px solid #f55" : "1px solid #333",
+              borderRadius: 8,
+              color: "#e0e0e0",
+              fontSize: 13,
+              outline: "none",
+            }}
+          />
+          <button
+            onClick={submitName}
+            disabled={!canName}
+            style={{ ...voteBtn("#76b900", "#000"), width: "100%", marginTop: 8, opacity: canName ? 1 : 0.55 }}
+          >
+            {state.org
+              ? t(lang, "header.renameBtn")
+              : t(lang, "header.foundBtn", { fee: INCORPORATION_FEE })}
+          </button>
+          {nameErr || fullErr ? (
             <div style={{ fontSize: 11, color: "#f55", marginTop: 6, display: "flex", alignItems: "center", gap: 4 }}>
-              <IconAlertTriangle size={12} /> {nameErr}
+              <IconAlertTriangle size={12} /> {nameErr || fullErr}
             </div>
           ) : (
             <div style={{ fontSize: 11, color: "#666", marginTop: 6 }}>{t(lang, "header.nameOk")}</div>
@@ -275,7 +300,10 @@ export default function CoPage() {
       <SectionTitle icon={<IconGlobe size={13} />} text={t(lang, "section.companyDetail")} />
       {named ? (
         <div style={{ ...panel, marginTop: 8, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-          <span style={{ fontWeight: "bold", fontSize: 13, color: "#e0e0e0" }}>「{companyName}」</span>
+          <span style={{ fontWeight: "bold", fontSize: 13, color: "#e0e0e0" }}>「{displayName}」</span>
+          {displayName !== companyName && (
+            <span style={{ fontSize: 10, color: "#777", letterSpacing: 0.5 }}>{companyName.toUpperCase()}</span>
+          )}
           <span style={{ fontSize: 11, color: "#888", display: "inline-flex", alignItems: "center", gap: 5 }}>
             <IconGlobe size={12} /> {t(lang, "home.addr")}
           </span>

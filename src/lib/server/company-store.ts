@@ -8,7 +8,9 @@ import {
   SEC_PER_YEAR,
   annualYield,
   applyAction,
+  isValidCompanyFullName,
   isValidCompanyName,
+  normalizeCompanyFullName,
   repairState,
   slugFromName,
   type GameAction,
@@ -502,7 +504,12 @@ export async function createFromLocal(
   }
   const org = raw.org;
   if (!org || typeof org !== "object" || typeof org.name !== "string" || !isValidCompanyName(org.name)) {
-    return bad("state.org.name 不是合法公司名（字母+数字 1-20，且非保留字）");
+    return bad("state.org.name 不是合法公司简称（1~6 位，字母在前、数字在后，且非保留字）");
+  }
+  // 全称可选：缺省/空串视为未填；给了就必须合法（≤24 字符，中英文/数字/空格与 - . & '）
+  const fullName = normalizeCompanyFullName(org.fullName);
+  if (fullName !== undefined && !isValidCompanyFullName(fullName)) {
+    return bad("state.org.fullName 不是合法公司全称（1~24 字符，中英文、数字、空格与 - . & '，禁 <> 等符号）");
   }
   const slug = slugFromName(org.name);
   if (RESERVED_SLUGS.has(slug)) return bad(`slug ${slug} 是保留路径`, "reserved_slug");

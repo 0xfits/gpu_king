@@ -9,6 +9,7 @@ import {
   balanceParts,
   marketCap,
   slugFromName,
+  companyDisplayName,
 } from "../../lib/game";
 import { t } from "../../lib/i18n";
 import { useGame } from "../../lib/game-context";
@@ -39,6 +40,8 @@ export default function CompanyPublicPage() {
   const org = state.org;
   const selfSlug = org ? slugFromName(org.name) : "";
   const isMine = !!org && selfSlug === slug;
+  /** 公开页展示全称（未填则回退简称）；slug 始终由简称生成 */
+  const displayName = companyDisplayName(org);
 
   const copyAddr = async () => {
     try {
@@ -90,7 +93,7 @@ export default function CompanyPublicPage() {
         }}
       >
         <span style={{ fontSize: 11, color: "#8ab4f8", display: "inline-flex", alignItems: "center", gap: 5 }}>
-          <IconGlobe size={12} /> {t(lang, "companyPage.publicOnly", { name: org!.name })}
+          <IconGlobe size={12} /> {t(lang, "companyPage.publicOnly", { name: displayName })}
         </span>
         <Link
           href="/"
@@ -106,7 +109,10 @@ export default function CompanyPublicPage() {
           <IconBuilding size={18} />
         </span>
         <h2 style={{ color: "#76b900", margin: 0, fontSize: 18 }}>{t(lang, "companyPage.title")}</h2>
-        <span style={{ fontSize: 15, color: "#e0e0e0" }}>「{org!.name}」</span>
+        <span style={{ fontSize: 15, color: "#e0e0e0" }}>「{displayName}」</span>
+        {displayName !== org!.name && (
+          <span style={{ fontSize: 10, color: "#777", letterSpacing: 0.5 }}>{org!.name.toUpperCase()}</span>
+        )}
         <button
           onClick={copyAddr}
           title={`/${slug}`}
