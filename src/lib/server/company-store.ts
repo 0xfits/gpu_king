@@ -203,6 +203,7 @@ const ACTION_TYPES = new Set([
   "recruit",
   "found",
   "rename",
+  "proposeFullName",
   "donate",
   "buy",
   "topup",
@@ -236,6 +237,9 @@ function validateAction(raw: unknown): { action?: GameAction; error?: string } {
     case "found":
     case "rename":
       if (typeof a.name !== "string") return { error: "action.name 必须是字符串" };
+      break;
+    case "proposeFullName":
+      if (typeof a.fullName !== "string") return { error: "action.fullName 必须是字符串" };
       break;
     case "donate":
       if (typeof a.donationId !== "string") return { error: "action.donationId 必须是字符串" };

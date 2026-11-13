@@ -194,6 +194,12 @@ export type Org = {
   name: string;
   /** 公司全称（可选，仅展示用）：1~24 字符，中英文皆可、可含空格；不影响 slug */
   fullName?: string;
+  /**
+   * 简称是否已永久锁定：命名提案通过后置 true。
+   * 锁定后 `rename` 一律硬拒（返回同一引用），只改全称走 `proposeFullName` 表决。
+   * 旧存档无此字段：repairState 按「已是非默认名 ⇒ 视为已锁定」补齐（旧 rename 本就只允许改默认名）。
+   */
+  nameLocked?: boolean;
   members: string[];
 } | null;
 
@@ -296,14 +302,30 @@ export interface GameState {
   lastSave: number;
 }
 
-export interface Proposal {
-  gpuId: string;
+export interface ProposalBase {
   proposerId: string;
   yes: number;
   no: number;
+  /** 已投票成员 → 是否赞成 */
   ballots: Record<string, boolean>;
   phase: "voting" | "passed" | "rejected" | "failed";
 }
+
+/**
+ * 提案多态：同一条表决通道承载四类决策。
+ * - `expand`：以 HASH 扩产（`gpuId`）
+ * - `kick`：罢免股东（`targetId`；旧存档的 `gpuId:"kick:<id>"` 编码由 repairState 迁移）
+ * - `naming`：公司命名（简称 + 可选全称，通过后简称永久锁定）
+ * - `fullName`：只改全称（简称不变，可反复发起）
+ *
+ * ★ 旧存档兼容：`kind` 是后加字段，缺省时 `repairState` 按 `gpuId` 反推
+ *   （能解析出 kick 目标 ⇒ kick，否则 expand），读取路径永不必处理 undefined kind。
+ */
+export type Proposal =
+  | (ProposalBase & { kind: "expand"; gpuId: string })
+  | (ProposalBase & { kind: "kick"; targetId: string })
+  | (ProposalBase & { kind: "naming"; name: string; fullName?: string })
+  | (ProposalBase & { kind: "fullName"; fullName: string });
 
 export type GameAction =
   /** 挂载后整体替换：把 localStorage 存档（loadInitial 结果）盖到 SSR 首帧状态上 */
@@ -317,7 +339,13 @@ export type GameAction =
   | { type: "quit" }
   | { type: "recruit"; memberId: string }
   | { type: "found"; name: string; fullName?: string }
+  /**
+   * 已废止（简称一经确定不可更改）：保留类型只为旧客户端/旧链接不报错，
+   * reducer 一律返回同一引用（服务端映射 400 invalid_action，不写库）。
+   */
   | { type: "rename"; name: string; fullName?: string }
+  /** 公司已命名并锁定后，只改全称：走表决，可反复发起（简称与 slug 不变） */
+  | { type: "proposeFullName"; fullName: string }
   | { type: "donate"; donationId: string }
   | { type: "buy"; goodId: string }
   | { type: "topup"; region: TopupRegion; amount: number; usdCost: number; rate: number }
@@ -347,7 +375,7 @@ export function initialState(seed = 20261112): GameState {
     capacity: 0,
     owned: {},
     members,
-    org: { name: DEFAULT_COMPANY_NAME, members: members.map((m) => m.id) },
+    org: { name: DEFAULT_COMPANY_NAME, members: members.map((m) => m.id), nameLocked: false },
     activeId: "u1",
     proposal: null,
     rng: seed >>> 0,
@@ -575,14 +603,54 @@ export function balanceParts(usd: number): { whole: string; pusd: string } {
   return { whole: `${whole.toFixed(6)} USD`, pusd: `+ ${pusd.toLocaleString()} pUSD` };
 }
 
-/** 当前是否处于「踢人」表决 */
-export function isKickVote(proposal: Proposal | null): boolean {
-  return !!proposal && proposal.gpuId.startsWith("kick:");
+/** 提案类型：旧存档对象无 `kind` 时按 `gpuId` 反推（未经 repair 的路径也读得懂） */
+export function proposalKind(p: Proposal | null): Proposal["kind"] | null {
+  if (!p) return null;
+  if (p.kind === "kick" || p.kind === "expand" || p.kind === "naming" || p.kind === "fullName") {
+    return p.kind;
+  }
+  return kickTargetId(p) ? "kick" : "expand";
 }
 
+/** 当前是否处于「踢人」表决 */
+export function isKickVote(proposal: Proposal | null): boolean {
+  return proposalKind(proposal) === "kick";
+}
+
+/**
+ * 罢免目标：新结构读 `kind:"kick"` 的 `targetId`；
+ * 兼容一版旧编码 `gpuId: "kick:<memberId>"`（repairState 会把旧存档迁移成新结构）。
+ */
 export function kickTargetId(proposal: Proposal | null): string | null {
-  if (!proposal || !proposal.gpuId.startsWith("kick:")) return null;
-  return proposal.gpuId.slice("kick:".length);
+  if (!proposal) return null;
+  if (proposal.kind === "kick") return proposal.targetId || null;
+  const legacy = (proposal as { gpuId?: unknown }).gpuId;
+  if (typeof legacy === "string" && legacy.startsWith("kick:")) {
+    const id = legacy.slice("kick:".length);
+    return id || null;
+  }
+  return null;
+}
+
+/** 扩产目标 GPU（其它类型返回 null） */
+export function expandGpuId(proposal: Proposal | null): string | null {
+  if (!proposal) return null;
+  return proposal.kind === "expand" ? proposal.gpuId : null;
+}
+
+/** 应投票人 = 在册真人 − 被罢免者（回避）；空槽不参与表决 */
+export function electorateOf(state: GameState, proposal: Proposal | null = state.proposal): string[] {
+  const kickId = kickTargetId(proposal);
+  return activeMembers(state).filter((id) => id !== kickId);
+}
+
+/**
+ * 通过阈值 = min(PASS_VOTES, 应投票人数)。
+ * 3 人公司仍是 2 票；**1 人公司 1 票即过** —— 否则单人公司所有表决永久卡死。
+ * `Math.max(1, …)` 兜住「 electorate 为空」的脏存档：0 票不得算通过。
+ */
+export function passVotesFor(state: GameState): number {
+  return Math.min(PASS_VOTES, Math.max(1, electorateOf(state).length));
 }
 
 /** 公司在册真人（排除空槽） */
@@ -659,11 +727,13 @@ function nextRandom(seed: number): [number, number] {
 }
 
 function startVote(state: GameState, proposal: Proposal, log?: [string, Record<string, string | number>]): GameState {
-  // 应投票人 = 在册真人 − 被罢免者（回避）；空槽不参与表决，避免卡死
-  const electorate = activeMembers(state).filter((id) => id !== kickTargetId(proposal));
   let next: GameState = { ...state, proposal };
   if (log) next = pushLog(next, log[0], log[1]);
+  // 应投票人 = 在册真人 − 被罢免者（回避）；空槽不参与表决，避免卡死
+  const electorate = electorateOf(next);
   if (electorate.length === 0) return { ...next, proposal: null };
+  // 已达通过阈值 ⇒ 立即生效（简单多数，不必等全员投完；1 人公司 1 票即过）
+  if (proposal.yes >= passVotesFor(next)) return resolveProposal(next);
   if (electorate.every((id) => id in proposal.ballots)) {
     return resolveProposal(next);
   }
@@ -764,6 +834,7 @@ export function applyAction(state: GameState, action: GameAction): GameState {
       const proposer = memberById(state, state.activeId);
       if (!proposer) return state;
       return startVote(state, {
+        kind: "expand",
         gpuId: gpu.id,
         proposerId: proposer.id,
         yes: 1,
@@ -780,7 +851,8 @@ export function applyAction(state: GameState, action: GameAction): GameState {
       return startVote(
         state,
         {
-          gpuId: `kick:${target.id}`,
+          kind: "kick",
+          targetId: target.id,
           proposerId: state.activeId,
           yes: 1,
           no: 0,
@@ -813,7 +885,11 @@ export function applyAction(state: GameState, action: GameAction): GameState {
         no: p.no + (action.yes ? 0 : 1),
       };
 
-      const electorate = activeMembers(state).filter((id) => id !== kickTargetId(next));
+      const electorate = electorateOf({ ...state, proposal: next });
+      // 简单多数：票数达阈值即通过（不足阈值则等全员投完再判，全员投完仍未达标 ⇒ 未通过）
+      if (next.yes >= passVotesFor({ ...state, proposal: next })) {
+        return resolveProposal({ ...state, proposal: next });
+      }
       if (electorate.some((id) => !(id in ballots))) {
         return { ...state, proposal: next };
       }
@@ -861,14 +937,37 @@ export function applyAction(state: GameState, action: GameAction): GameState {
     }
 
     case "found": {
-      // 重新成立公司：简称严格校验（1~6 位、字母在前数字在后），缴注册费 100，分红池重置。
-      // 创始人重新出资：每人 SEED_MONEY，**优先扣赠金池 grants，不足再扣个人钱包**，
-      // 实付累加进 funding（fromGrants 只记赠金部分），并注入公司账户
-      if (state.org) return state;
+      // 命名改成**提案制**：found 只做「提名」，简称通过股东表决才生效（通过后永久锁定）。
+      // A) 公司仍在且仍是默认名 ⇒ 纯提名，不动资金；
+      // B) 无公司（解散后重立）⇒ 照旧出资 + 缴注册费，公司先以默认名落地，再由股东表决命名。
       if (!isValidCompanyName(action.name)) return state;
       const fullName = normalizeCompanyFullName(action.fullName);
-      // 给了全称就必须合法（空白串视为未给）；未给则用简称
+      // 给了全称就必须合法（空白串视为未给）；未给则通过后用简称
       if (fullName !== undefined && !isValidCompanyFullName(fullName)) return state;
+      if (state.proposal) return state; // 一次只办一个表决
+      const naming: Proposal = {
+        kind: "naming",
+        name: action.name,
+        ...(fullName !== undefined ? { fullName } : {}),
+        proposerId: state.activeId,
+        yes: 1,
+        no: 0,
+        ballots: { [state.activeId]: true },
+        phase: "voting",
+      };
+
+      if (state.org) {
+        // 已命名 ⇒ 简称锁定，不许再提名（只能改全称，见 proposeFullName）
+        if (state.org.name !== DEFAULT_COMPANY_NAME) return state;
+        if (!activeMembers(state).includes(state.activeId)) return state;
+        return startVote(state, naming, [
+          "log.namingStart",
+          { m: state.activeId, name: action.name },
+        ]);
+      }
+
+      // 创始人重新出资：每人 SEED_MONEY，**优先扣赠金池 grants，不足再扣个人钱包**，
+      // 实付累加进 funding（fromGrants 只记赠金部分），并注入公司账户
       const idle = state.members.filter((m) => !isInOrg(state, m.id));
       if (idle.length === 0) return state;
       if (state.usd < INCORPORATION_FEE) return state;
@@ -884,7 +983,8 @@ export function applyAction(state: GameState, action: GameAction): GameState {
         lockedWallets: pools.lockedWallets,
         funding: pools.funding,
         dividends: 0,
-        org: { name: action.name, fullName: fullName ?? action.name, members: crew },
+        // 公司以默认名落地（未锁定），真正的名字由下面这张命名提案决定
+        org: { name: DEFAULT_COMPANY_NAME, members: crew, nameLocked: false },
         activeId: crew[0],
         members: state.members.map((m) =>
           crew.includes(m.id) ? { ...m, contribution: 0 } : m,
@@ -896,21 +996,41 @@ export function applyAction(state: GameState, action: GameAction): GameState {
         n: crew.length,
         seed: raised.toFixed(6),
       });
-      return out;
+      // 提案人 = 新公司的首位股东（出资后 activeId 已切到他）
+      const founder = crew[0];
+      return startVote(
+        out,
+        { ...naming, proposerId: founder, ballots: { [founder]: true } },
+        ["log.namingStart", { m: founder, name: action.name }],
+      );
     }
 
     case "rename": {
-      // 首局开局命名：仅当公司仍为默认名时允许改一次
-      if (!state.org || state.org.name !== DEFAULT_COMPANY_NAME) return state;
-      if (!isValidCompanyName(action.name)) return state;
+      // 已废止：简称一经命名提案通过即永久锁定，改名一律硬拒（返回同一引用）。
+      // 全称可反复改，但必须走 `proposeFullName` 表决。
+      return state;
+    }
+
+    case "proposeFullName": {
+      // 全称可反复投票修改：要求已命名并锁定、无进行中提案、提案人是活跃成员、全称合法
+      if (!state.org || state.org.nameLocked !== true) return state;
+      if (state.proposal) return state;
+      if (!activeMembers(state).includes(state.activeId)) return state;
       const fullName = normalizeCompanyFullName(action.fullName);
-      if (fullName !== undefined && !isValidCompanyFullName(fullName)) return state;
-      let out: GameState = {
-        ...state,
-        org: { ...state.org, name: action.name, fullName: fullName ?? state.org.fullName ?? action.name },
-      };
-      out = pushLog(out, "log.rename", { name: action.name });
-      return out;
+      if (fullName === undefined || !isValidCompanyFullName(fullName)) return state;
+      return startVote(
+        state,
+        {
+          kind: "fullName",
+          fullName,
+          proposerId: state.activeId,
+          yes: 1,
+          no: 0,
+          ballots: { [state.activeId]: true },
+          phase: "voting",
+        },
+        ["log.fullNameStart", { m: state.activeId, name: fullName }],
+      );
     }
 
     case "donate": {
@@ -1057,7 +1177,8 @@ function resolveProposal(state: GameState): GameState {
   const p = state.proposal;
   if (!p || p.phase !== "voting" || !state.org) return state;
 
-  if (p.yes < PASS_VOTES) {
+  // 阈值按应投票人封顶：3 人公司 2 票，1 人公司 1 票（否则单人公司永久卡死）
+  if (p.yes < passVotesFor(state)) {
     return {
       ...state,
       proposal: { ...p, phase: "rejected" },
@@ -1065,14 +1186,43 @@ function resolveProposal(state: GameState): GameState {
     };
   }
 
-  // 罢免案：投票通过即生效，离开结算入钱包
+  // —— 罢免案：投票通过即生效，离开结算入钱包 ——
   const kickId = kickTargetId(p);
-  if (kickId) {
+  if (proposalKind(p) === "kick" && kickId) {
     return removeMember({ ...state, proposal: { ...p, phase: "passed" } }, kickId, true);
   }
 
-  // 扩产案：以 HASH 出资；投票通过后结算成败，成败影响硬件工厂 / AI 公司声望
-  const gpu = gpuById(p.gpuId);
+  // —— 命名案：通过后简称生效并**永久锁定**，全称缺省回退简称 ——
+  if (p.kind === "naming") {
+    const lockedName = p.name;
+    const lockedFull = normalizeCompanyFullName(p.fullName) ?? lockedName;
+    let out: GameState = {
+      ...state,
+      org: { ...state.org, name: lockedName, fullName: lockedFull, nameLocked: true },
+      proposal: { ...p, phase: "passed" },
+    };
+    out = pushLog(out, "log.named", { name: lockedName, full: lockedFull, m: p.proposerId });
+    return out;
+  }
+
+  // —— 全称修改案：只换全称，简称与 slug 不动 ——
+  if (p.kind === "fullName") {
+    const nextFull = p.fullName;
+    let out: GameState = {
+      ...state,
+      org: { ...state.org, fullName: nextFull },
+      proposal: { ...p, phase: "passed" },
+    };
+    out = pushLog(out, "log.fullNameOk", {
+      name: nextFull,
+      short: state.org.name,
+      m: p.proposerId,
+    });
+    return out;
+  }
+
+  // —— 扩产案：以 HASH 出资；投票通过后结算成败，成败影响硬件工厂 / AI 公司声望 ——
+  const gpu = gpuById(expandGpuId(p) ?? "");
   if (!gpu) return { ...state, proposal: { ...p, phase: "rejected" } };
 
   const proposer = memberById(state, p.proposerId);
@@ -1261,6 +1411,68 @@ function giftList(v: unknown): GiftBox[] {
   return out;
 }
 
+/** 票箱修复：只保留 boolean 值 */
+function proposalBallots(v: unknown): Record<string, boolean> {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return {};
+  const out: Record<string, boolean> = {};
+  for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+    if (k !== "") out[k] = !!val;
+  }
+  return out;
+}
+
+/**
+ * 提案结构修复（**旧存档兼容的核心**）：
+ * 旧格式只有 `gpuId`、没有 `kind`，罢免案用 `gpuId:"kick:<memberId>"` 隐式编码。
+ * 这里按 `gpuId` 反推补齐成多态结构：能解析出 kick 目标 ⇒ `kind:"kick"` + `targetId`，
+ * 否则 ⇒ `kind:"expand"`。yes/no 一律由 ballots 重算（与 reducer 产出的不变式一致）。
+ * 任何无法判定的脏数据 ⇒ 直接丢弃提案（返回 null），绝不让读取报错。
+ */
+export function normalizeProposal(raw: unknown): Proposal | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  const ballots = proposalBallots(r.ballots);
+  const yes = Object.values(ballots).filter(Boolean).length;
+  const no = Object.values(ballots).filter((v) => !v).length;
+  const phaseRaw = r.phase;
+  const phase: ProposalBase["phase"] =
+    phaseRaw === "passed" || phaseRaw === "rejected" || phaseRaw === "failed"
+      ? phaseRaw
+      : "voting";
+  const base: ProposalBase = {
+    proposerId: typeof r.proposerId === "string" ? r.proposerId : "",
+    yes,
+    no,
+    ballots,
+    phase,
+  };
+  const gpuRaw = typeof r.gpuId === "string" ? r.gpuId : "";
+  const targetRaw = typeof r.targetId === "string" ? r.targetId : "";
+  const legacyKick = gpuRaw.startsWith("kick:") ? gpuRaw.slice("kick:".length) : "";
+  const kindRaw = r.kind;
+
+  if (kindRaw === "kick" || (!kindRaw && (targetRaw || legacyKick))) {
+    const targetId = targetRaw || legacyKick;
+    if (!targetId) return null;
+    return { ...base, kind: "kick", targetId };
+  }
+  if (kindRaw === "naming") {
+    const name = typeof r.name === "string" ? r.name : "";
+    if (!isValidCompanyName(name)) return null;
+    const fullName = normalizeCompanyFullName(r.fullName);
+    if (fullName !== undefined && !isValidCompanyFullName(fullName)) return null;
+    return { ...base, kind: "naming", name, ...(fullName !== undefined ? { fullName } : {}) };
+  }
+  if (kindRaw === "fullName") {
+    const fullName = normalizeCompanyFullName(r.fullName);
+    if (fullName === undefined || !isValidCompanyFullName(fullName)) return null;
+    return { ...base, kind: "fullName", fullName };
+  }
+  // 其余（含旧存档无 kind 的扩产案）一律按扩产处理；gpuId 非法则由结算处判 rejected
+  if (!gpuRaw || gpuRaw.startsWith("kick:")) return null;
+  return { ...base, kind: "expand", gpuId: gpuRaw };
+}
+
 /** 载入修复：补齐缺失字段，并自动结算卡死在投票态的历史表决 */
 export function repairState(state: GameState): GameState {
   const s: GameState = {
@@ -1276,11 +1488,17 @@ export function repairState(state: GameState): GameState {
     lockedWallets: numberMap(state.lockedWallets),
     gifts: giftList(state.gifts),
     funding: fundingMap(state.funding),
+    // 提案多态化：旧存档的提案只有 gpuId（无 kind）⇒ 这里补齐，读取路径不再见 undefined
+    proposal: normalizeProposal(state.proposal),
     org: state.org
       ? {
           name: state.org.name || DEFAULT_COMPANY_NAME,
           // 旧存档无 fullName ⇒ undefined（视为未填），展示时回退简称，绝不报错
           fullName: normalizeCompanyFullName(state.org.fullName),
+          // 旧存档无 nameLocked ⇒ 已是非默认名即视为锁定（旧 rename 本就只允许改默认名）
+          nameLocked:
+            state.org.nameLocked === true ||
+            (state.org.name || DEFAULT_COMPANY_NAME) !== DEFAULT_COMPANY_NAME,
           members: state.org.members,
         }
       : state.org,
@@ -1288,7 +1506,7 @@ export function repairState(state: GameState): GameState {
   };
   const p = s.proposal;
   if (!p || p.phase !== "voting" || !s.org) return s;
-  const electorate = activeMembers(s).filter((id) => id !== kickTargetId(p));
+  const electorate = electorateOf(s, p);
   if (Object.keys(p.ballots).some((id) => !electorate.includes(id))) {
     const ballots: Record<string, boolean> = {};
     let yes = 0;
@@ -1303,6 +1521,8 @@ export function repairState(state: GameState): GameState {
   }
   const cur = s.proposal!;
   if (electorate.length === 0) return { ...s, proposal: null };
+  // 已达阈值 / 全员投完 ⇒ 结算（旧存档卡在投票态的提案在这里自动闭环）
+  if (cur.yes >= passVotesFor(s)) return resolveProposal(s);
   if (electorate.every((id) => id in cur.ballots)) {
     return resolveProposal(s);
   }

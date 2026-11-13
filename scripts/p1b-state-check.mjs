@@ -105,7 +105,16 @@ function dissolvedState(pools) {
 
 const allGrants = dissolvedState({ grants: { u1: 200, u2: 200, u3: 200 } });
 const r1 = g.applyAction(allGrants, { type: "found", name: "NEWCO" });
-check("found 生效（org 建立）", r1 !== allGrants && r1.org?.name === "NEWCO", r1.org);
+// 命名改成提案制：found 只建公司 + 发起 kind:"naming" 表决，简称通过表决才生效
+check(
+  "found 生效（org 建立，名称进入 naming 提案）",
+  r1 !== allGrants &&
+    !!r1.org &&
+    r1.org.name === g.DEFAULT_COMPANY_NAME &&
+    r1.proposal?.kind === "naming" &&
+    r1.proposal?.name === "NEWCO",
+  [r1.org, r1.proposal],
+);
 check(
   "found 优先扣 grants：三人赠金 200 → 0",
   r1.grants.u1 === 0 && r1.grants.u2 === 0 && r1.grants.u3 === 0,

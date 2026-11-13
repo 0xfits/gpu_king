@@ -12,15 +12,17 @@
 
 import {
   GPUS,
-  PASS_VOTES,
   YIELD_PER_HASH,
   activeMembers,
   canBeKicked,
   companyComposite,
   compositeRep,
+  expandGpuId,
   gpuById,
+  kickTargetId,
   linkedComposite,
   memberById,
+  passVotesFor,
   rejoinCost,
   successChance,
 } from "../lib/game";
@@ -221,27 +223,47 @@ export function Shareholders({ readOnly = false }: { readOnly?: boolean }) {
   );
 }
 
-/** 表决面板：扩产 / 罢免共用（readOnly 时只读表与票数） */
+/** 表决面板：扩产 / 罢免 / 公司命名 / 全称修改四类共用（readOnly 时只读表与票数） */
 function ProposalPanel({ readOnly }: { readOnly: boolean }) {
   const { state, dispatch, lang } = useGame();
   const proposal = state.proposal;
   if (!proposal) return null;
 
   const crew = activeMembers(state);
-  const kickTarget = proposal.gpuId.startsWith("kick:") ? proposal.gpuId.slice(5) : "";
+  const kickTarget = kickTargetId(proposal) ?? "";
   const nameOf = (id: string) => memberLabel(lang, memberById(state, id)?.name ?? id);
   const waitingToVote =
     proposal.phase === "voting"
       ? crew.filter((id) => !(id in (proposal.ballots || {})) && id !== kickTarget)
       : [];
   const nextVoter = waitingToVote[0];
-  const gpu = kickTarget ? undefined : gpuById(proposal.gpuId);
-  const title = kickTarget
-    ? t(lang, "vote.titleKick", { m: nameOf(kickTarget) })
-    : t(lang, "vote.titleExpand", {
-        gpu: gpu?.name ?? proposal.gpuId,
-        cost: gpu?.cost.toLocaleString() ?? "",
-      });
+  // 阈值随在册人数封顶：3 人公司 2 票，1 人公司 1 票
+  const need = passVotesFor(state);
+
+  /**
+   * 标题与副行按 kind 分支（四种类型的展示文案集中在这里）：
+   * expand 扩产 / kick 罢免 / naming 公司命名 / fullName 全称修改。
+   */
+  let title: string;
+  let detail = "";
+  if (kickTarget) {
+    title = t(lang, "vote.titleKick", { m: nameOf(kickTarget) });
+  } else if (proposal.kind === "naming") {
+    title = t(lang, "vote.titleNaming", { name: proposal.name });
+    detail = t(lang, "vote.namingDetail", {
+      name: proposal.name,
+      full: proposal.fullName ?? proposal.name,
+    });
+  } else if (proposal.kind === "fullName") {
+    title = t(lang, "vote.titleFullName", { name: proposal.fullName });
+    detail = t(lang, "vote.fullNameDetail", { name: proposal.fullName });
+  } else {
+    const gpu = gpuById(expandGpuId(proposal) ?? "");
+    title = t(lang, "vote.titleExpand", {
+      gpu: gpu?.name ?? expandGpuId(proposal) ?? "",
+      cost: gpu?.cost.toLocaleString() ?? "",
+    });
+  }
 
   return (
     <div style={{ ...panel, borderColor: "#76b900" }}>
@@ -251,11 +273,14 @@ function ProposalPanel({ readOnly }: { readOnly: boolean }) {
           {t(lang, "vote.by", { m: nameOf(proposal.proposerId) })}
         </span>
       </div>
+      {detail && (
+        <div style={{ fontSize: 12, color: "#aaa", marginBottom: 6 }}>{detail}</div>
+      )}
       <div style={{ fontSize: 13, marginBottom: 8 }}>
         {t(lang, "vote.tally", {
           yes: proposal.yes,
           no: proposal.no,
-          need: PASS_VOTES,
+          need,
         })}
         {proposal.phase === "voting" && nextVoter && (
           <span style={{ color: "#fa0" }}>{t(lang, "vote.waiting", { m: nameOf(nextVoter) })}</span>
