@@ -27,7 +27,12 @@ export async function POST(req: Request) {
     if (typeof body !== "object" || body === null || Array.isArray(body)) {
       return fail(400, "bad_request", "请求体必须是 JSON 对象");
     }
-    const res = await createFromLocal((body as { state?: unknown }).state, auth.uid);
+    const raw = body as { state?: unknown; slug?: unknown };
+    const res = await createFromLocal(
+      raw.state,
+      auth.uid,
+      typeof raw.slug === "string" ? raw.slug : null,
+    );
     if (!res.ok) return fail(res.status, res.error, res.msg);
     return ok({
       slug: res.slug,

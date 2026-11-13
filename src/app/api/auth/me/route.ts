@@ -1,5 +1,6 @@
 import { displayName, getUser, upsertUser } from "../../../../lib/server/auth-store";
 import { fail, internal, ok } from "../../../../lib/server/api";
+import { companyForDiscordUser } from "../../../../lib/server/company-store";
 import {
   AuthConfigError,
   SESSION_COOKIE,
@@ -58,6 +59,9 @@ export async function GET(req: Request) {
         name: displayName(row) ?? session.uid,
         avatar: row.avatar ?? session.avatar ?? null,
       },
+      // 已绑定公司时带上（客户端据此决定「云模式：加载存档」还是「新建公司」）
+      // 未绑定 / 查询失败 ⇒ null（客户端按「无公司」走新建流程，不阻塞登录）
+      company: await companyForDiscordUser(row.discord_id).catch(() => null),
     });
   } catch (err) {
     return internal("auth/me", err);

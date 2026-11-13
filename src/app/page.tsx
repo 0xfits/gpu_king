@@ -25,6 +25,7 @@ import { t, memberLabel } from "../lib/i18n";
 import { useGame } from "../lib/game-context";
 import { RepBars } from "../components/rep-bars";
 import { LogFeed } from "../components/log-feed";
+import { CloudCompanyPanel, NamingStatusCard } from "../components/cloud-company";
 import { CompanyRepPanel, GpuGenerations, Shareholders } from "../components/company-sections";
 import { panel, badge, voteBtn, iconBtn } from "../components/ui";
 import { PageBody, SectionTitle } from "../components/shell";
@@ -47,7 +48,7 @@ import {
  * 全网公司排名已迁至 /public（共用 components/leaderboard.tsx）。
  */
 export default function CoPage() {
-  const { state, dispatch, lang, flash, pulse } = useGame();
+  const { state, dispatch, lang, flash, pulse, cloud, authLoading, company, cloudStatus } = useGame();
   const [nameInput, setNameInput] = useState("");
   const [fullInput, setFullInput] = useState("");
   const [copied, setCopied] = useState(false);
@@ -135,8 +136,26 @@ export default function CoPage() {
     }
   };
 
+  /**
+   * 云模式三态（登录后 state 的权威来源是数据库）：
+   * - 探测/加载中 ⇒ 只显示加载提示（不拿 initialState 冒充玩家存档）
+   * - 云端无公司 ⇒ 只显示「在数据库新建公司」表单（不回落本机命名面板/本机存档）
+   * - 否则 ⇒ 正常游戏页面
+   */
+  const cloudBusy = authLoading || (cloud && cloudStatus === "loading");
+  const needCreateCompany = cloud && !authLoading && !company;
+
   return (
     <PageBody>
+      {cloudBusy ? (
+        <p style={{ fontSize: 12, color: "#888", margin: "16px 0 0" }}>{t(lang, "cloud.loading")}</p>
+      ) : needCreateCompany ? (
+        <CloudCompanyPanel />
+      ) : (
+        <>
+      {/* 建司第二步（命名表決）在刷新后仍未落库时的兜底卡：a 已入库、b 没落库时
+          /api/auth/me 已能查到公司 ⇒ 页面回到正常视图，靠这张卡把表决补完 */}
+      {cloud && <NamingStatusCard />}
       {/* ============ 1) 命名面板（提名 → 股东表决；通过后简称永久锁死） ============ */}
       {(needsNaming || !state.org) &&
         (namingProposal ? (
@@ -469,6 +488,8 @@ export default function CoPage() {
 
       {/* ============ 7) 公司动态（全网公司排名已迁至 /public） ============ */}
       <LogFeed state={state} lang={lang} />
+        </>
+      )}
     </PageBody>
   );
 }

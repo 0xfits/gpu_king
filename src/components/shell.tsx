@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { annualYield, balanceParts, slugFromName, DEFAULT_COMPANY_NAME, companyDisplayName } from "../lib/game";
@@ -12,6 +13,11 @@ import {
   IconHeartHandshake,
   IconWallet,
   IconZap,
+  IconLogIn,
+  IconLogOut,
+  IconCloud,
+  IconAlertTriangle,
+  IconX,
 } from "./icons";
 import { badge, voteBtn } from "./ui";
 
@@ -44,9 +50,109 @@ function NavLink({ href, label, active, icon: Icon }: NavItem) {
   );
 }
 
-/** 公共页眉：品牌 + 全局资源条 + 导航（Co / Public / Shop）+ 语言切换 */
+/** 顶栏右侧的登录态区域：未登录 ⇒ Discord 登录链接；已登录 ⇒ 头像 + 名字 + 登出 */
+function AuthArea() {
+  const { lang, cloud, authLoading, user, signOut } = useGame();
+  const [busy, setBusy] = useState(false);
+
+  if (cloud && user) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        {user.avatar ? (
+          // Discord CDN 头像（avatar 为空时回退首字母圆点，避免破图）
+          <img
+            src={`https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png?size=32`}
+            alt={t(lang, "auth.avatarAlt", { name: user.name })}
+            width={20}
+            height={20}
+            style={{ borderRadius: "50%", display: "block" }}
+          />
+        ) : (
+          <span
+            aria-hidden
+            style={{
+              width: 20,
+              height: 20,
+              borderRadius: "50%",
+              background: "#2a2a2a",
+              color: "#76b900",
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: 10,
+              fontWeight: "bold",
+            }}
+          >
+            {user.name.slice(0, 1).toUpperCase()}
+          </span>
+        )}
+        <span
+          title={user.name}
+          style={{ fontSize: 11, color: "#ccc", maxWidth: 90, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+        >
+          {user.name}
+        </span>
+        <button
+          onClick={async () => {
+            setBusy(true);
+            await signOut();
+            setBusy(false);
+          }}
+          disabled={busy}
+          style={{
+            ...voteBtn("#222", "#999"),
+            fontSize: 11,
+            padding: "3px 8px",
+            border: "1px solid #333",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 4,
+            opacity: busy ? 0.6 : 1,
+          }}
+        >
+          <IconLogOut size={11} /> {t(lang, "auth.logout")}
+        </button>
+      </div>
+    );
+  }
+
+  // 登录探测未返回时留白（避免「先显示登录链接再变头像」的闪烁与误点）
+  if (authLoading) return null;
+
+  return (
+    <a
+      href="/api/auth/login"
+      style={{
+        ...voteBtn("#5865f2", "#fff"),
+        fontSize: 11,
+        padding: "4px 10px",
+        textDecoration: "none",
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 5,
+      }}
+    >
+      <IconLogIn size={12} /> {t(lang, "auth.login")}
+    </a>
+  );
+}
+
+/** 公共页眉：品牌 + 登录态 + 全局资源条 + 导航（Co / Public / Shop）+ 语言切换 */
 export function AppHeader() {
-  const { state, lang, setLang } = useGame();
+  const {
+    state,
+    lang,
+    setLang,
+    cloud,
+    company,
+    unsynced,
+    notice,
+    dismissNotice,
+    localSaveFound,
+    localSaveDismissed,
+    dismissLocalSave,
+    clearLocalSave,
+  } = useGame();
   const pathname = usePathname();
   const parts = balanceParts(state.usd);
   const yieldNow = annualYield(state);
@@ -86,9 +192,12 @@ export function AppHeader() {
           <h1 style={{ color: "#76b900", margin: 0, fontSize: 20, display: "flex", alignItems: "center", gap: 8 }}>
             <IconBuilding size={19} />
             GPU_King
-            {state.org && <span style={{ fontSize: 14, color: "#e0e0e0" }}>「{companyDisplayName(state.org)}」</span>}
+            {(!cloud || company) && state.org && (
+              <span style={{ fontSize: 14, color: "#e0e0e0" }}>「{companyDisplayName(state.org)}」</span>
+            )}
           </h1>
-          <div style={{ display: "flex", gap: 4 }}>
+          <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <AuthArea />
             {LANGS.map((l) => (
               <button
                 key={l.key}
@@ -117,6 +226,15 @@ export function AppHeader() {
             {Math.floor(state.hash).toLocaleString()} HASH
           </span>
           <span style={badge}>APY {(yieldNow * 100).toFixed(2)}%</span>
+          {cloud && company && (
+            <span style={{ ...badge, color: "#8ab4f8", display: "inline-flex", alignItems: "center", gap: 5 }}>
+              <IconCloud size={11} />
+              /{company.slug}
+            </span>
+          )}
+          {cloud && unsynced && (
+            <span style={{ ...badge, color: "#fa0", borderColor: "#5a4600" }}>{t(lang, "cloud.unsynced")}</span>
+          )}
         </div>
 
         {/* 导航 */}
@@ -125,6 +243,70 @@ export function AppHeader() {
             <NavLink key={item.href} {...item} />
           ))}
         </nav>
+
+        {/* 云模式提示条：冲突 / 登录过期 / 非成员 / 加载失败（可关闭，不打断操作） */}
+        {notice && (
+          <div
+            style={{
+              marginTop: 10,
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              fontSize: 11,
+              padding: "6px 10px",
+              borderRadius: 8,
+              border: `1px solid ${
+                notice.kind === "error" ? "#6b2020" : notice.kind === "warn" ? "#5a4600" : "#2a3a1a"
+              }`,
+              background: "#141414",
+              color: notice.kind === "error" ? "#ff8a8a" : notice.kind === "warn" ? "#fa0" : "#a5d36a",
+            }}
+          >
+            <IconAlertTriangle size={12} />
+            <span style={{ flex: 1 }}>{t(lang, notice.k, notice.p)}</span>
+            <button
+              onClick={dismissNotice}
+              aria-label={t(lang, "cloud.dismiss")}
+              style={{ background: "none", border: "none", color: "inherit", cursor: "pointer", padding: 0, display: "inline-flex" }}
+            >
+              <IconX size={12} />
+            </button>
+          </div>
+        )}
+
+        {/* 已登录且本机仍有旧存档：只提示 + 手动清除（绝不自动删） */}
+        {cloud && localSaveFound && !localSaveDismissed && (
+          <div
+            style={{
+              marginTop: 10,
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              fontSize: 11,
+              padding: "6px 10px",
+              borderRadius: 8,
+              border: "1px solid #333",
+              background: "#141414",
+              color: "#999",
+            }}
+          >
+            <IconCloud size={12} />
+            <span style={{ flex: 1 }}>{t(lang, "cloud.localSave")}</span>
+            <button
+              onClick={clearLocalSave}
+              style={{ ...badge, cursor: "pointer", background: "#101010", color: "#e0e0e0", border: "1px solid #444" }}
+            >
+              {t(lang, "cloud.clearLocal")}
+            </button>
+            <button
+              onClick={dismissLocalSave}
+              aria-label={t(lang, "cloud.dismiss")}
+              style={{ background: "none", border: "none", color: "inherit", cursor: "pointer", padding: 0, display: "inline-flex" }}
+            >
+              <IconX size={12} />
+            </button>
+          </div>
+        )}
       </div>
     </header>
   );

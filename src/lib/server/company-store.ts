@@ -8,6 +8,7 @@ import {
   SEC_PER_YEAR,
   annualYield,
   applyAction,
+  electorateOf,
   isValidCompanyFullName,
   isValidCompanyName,
   normalizeCompanyFullName,
@@ -92,6 +93,8 @@ interface CompanyRow {
   state_version: number;
   last_settled_at: Date;
   updated_at: Date;
+  /** 真人创建者；非空 ⇒ 这是「云模式真人公司」，空位成员是机器人股东 */
+  owner_discord_id?: string | null;
 }
 
 function parseState(v: unknown): GameState {
@@ -332,6 +335,63 @@ export type ActionOutcome =
   | { kind: "error"; status: number; error: string; msg: string };
 
 /**
+ * 机器人股东补票（**只对云模式真人公司生效**）：
+ * `company_members.discord_id IS NULL` 的成员位是「机器人股东」，它们**只投赞成票**。
+ *
+ * 为什么放服务端：票数必须权威。若让客户端补票，玩家就能自己决定票数
+ * （改前端 = 改投票结果），云模式的表决也就失去了意义。
+ *
+ * 实现：一次投完所有「还没投过」的机器人位，然后由 reducer 结算（通过 ⇒ phase 变 passed）。
+ * ⚠ 票数记录要完整：reducer 的 `ballot` 是**达阈值即结算**（3 人公司 2 票就过），
+ *   若逐位调用 `applyAction`，第二位机器人投完就闭环，`ballots` 只留 2 票，
+ *   看起来像「有人漏投」。所以除最后一位外的机器人票直接记入 `ballots`（纯数据），
+ *   **最后一位仍走 `applyAction(ballot)`** 由 reducer 亲自结算 —— 记录里就是全员 3:0。
+ *   这只在服务端拼 ballots，reducer 的结算语义一字未动。
+ *
+ * 全部与本次 action 在**同一事务、同一次 UPDATE**里落库：客户端不需要自己补票，
+ * 也不会出现「投了一半」的中间态。
+ */
+async function autoBotBallots(
+  client: PoolClient,
+  slug: string,
+  state: GameState,
+): Promise<GameState> {
+  const p0 = state.proposal;
+  if (!p0 || p0.phase !== "voting") return state;
+
+  const bots = await client.query<{ member_id: string }>(
+    `select member_id from company_members
+      where company_id = $1 and discord_id is null
+      order by member_id`,
+    [slug],
+  );
+
+  // 只补「在应投票人里、且还没投过」的机器人位（已投过 ⇒ 幂等跳过）
+  const electorate = electorateOf(state, p0);
+  const pending = bots.rows
+    .map((b) => b.member_id)
+    .filter((id) => electorate.includes(id) && !(id in p0.ballots));
+  if (pending.length === 0) return state;
+
+  let out = state;
+  const rest = pending.slice(0, -1);
+  const last = pending[pending.length - 1]!;
+  if (rest.length) {
+    const cur = out.proposal!;
+    const ballots: Record<string, boolean> = { ...cur.ballots };
+    let yes = cur.yes;
+    for (const id of rest) {
+      ballots[id] = true;
+      yes += 1;
+    }
+    out = { ...out, proposal: { ...cur, ballots, yes } };
+  }
+  const voted = applyAction(out, { type: "ballot", memberId: last, yes: true });
+  // 防御：最后一位投不进去（不在册 / 已投）⇒ 保留已记入的票，不再动
+  return voted === out ? out : voted;
+}
+
+/**
  * 乐观锁写入一次玩家操作：
  * 事务 → **公司存在性(404) → 成员归属(403)** → 结构校验(400) → SELECT ... FOR UPDATE → 结算 →
  * 版本校验 → applyAction → 校验 action 生效 → UPDATE（state_version = expectedVersion + 1）
@@ -392,7 +452,7 @@ export async function applyActionToCompany(
     const action = v.action;
 
     const rows = await client.query<CompanyRow>(
-      "select id, name, state, state_version, last_settled_at from companies where id = $1 for update",
+      "select id, name, state, state_version, last_settled_at, owner_discord_id from companies where id = $1 for update",
       [slug],
     );
     const row = rows.rows[0];
@@ -409,16 +469,37 @@ export async function applyActionToCompany(
       return { kind: "conflict", state: settled, version: row.state_version } as ActionOutcome;
     }
 
-    const next = applyAction(settled, action);
-    if (next === settled) {
-      // reducer 对「阶段不合法」返回同一引用：不写库，4xx
-      return {
-        kind: "error",
-        status: 400,
-        error: "invalid_action",
-        msg: `action ${action.type} 不适用于当前状态`,
-      } as ActionOutcome;
+    let applied = applyAction(settled, action);
+    if (applied === settled) {
+      // 幂等的「命名提名重试」：提案已在表决中（上一次补票的响应丢了 / 客户端重试 b 步骤 /
+      // 建司中途刷新）⇒ 只补机器人票并结算，不改「其它非法 action 一律 400」的既有契约。
+      // 条件收紧到「同一份命名提案」：别的 kind 的表决、以及已命名的公司照旧 400。
+      const p0 = settled.proposal;
+      const retry =
+        action.type === "found" &&
+        row.owner_discord_id &&
+        p0?.kind === "naming" &&
+        p0.phase === "voting" &&
+        p0.name === action.name
+          ? await autoBotBallots(client, slug, settled)
+          : settled;
+      if (retry === settled) {
+        // reducer 对「阶段不合法」返回同一引用：不写库，4xx
+        return {
+          kind: "error",
+          status: 400,
+          error: "invalid_action",
+          msg: `action ${action.type} 不适用于当前状态`,
+        } as ActionOutcome;
+      }
+      applied = retry;
     }
+
+    // 云模式真人公司：空位成员位（discord_id IS NULL）是机器人股东，只投赞成票。
+    // 同一事务内补齐，再一次性写库 ⇒ 客户端收到的是**已结算**的 state，不需要自己补票。
+    const next = row.owner_discord_id
+      ? await autoBotBallots(client, slug, applied)
+      : applied;
 
     const prevLog = new Set(settled.log);
     const freshLogs = next.log.filter((e) => !prevLog.has(e)).slice(0, 20);
@@ -479,12 +560,18 @@ export type ImportOutcome =
  * 绑定哪一位成员：`state.activeId`（不在册则回退 `members[0]`）。
  * slug 冲突（公司已存在）→ 409（insert 是本事务第一条写，抛错即回滚，赠金不会被吃掉）。
  *
+ * **`slugHint`（可选）**：云模式「建司但未命名」时，state 里的简称是默认名 `GPU1`，
+ * 按简称派生 slug 会让所有新公司都撞 `gpu1`。此时由调用方显式给出地址段
+ * （= 玩家首选的简称），公司先以未命名状态落地，命名表决通过后再改 `org.name`。
+ * 省略该参数 ⇒ 行为与旧版**逐字相同**（slug = slugFromName(org.name)）。
+ *
  * @param discordId 当前登录账号的 Discord user id；null/undefined ⇒ 只导入不绑身份
  *                  （仅供离线迁移脚本用，路由层必须传真实 uid）。
  */
 export async function createFromLocal(
   input: unknown,
   discordId: string | null = null,
+  slugHint?: string | null,
 ): Promise<ImportOutcome> {
   await ensureSchema();
   const bad = (msg: string, error = "invalid_state", status = 400): ImportOutcome => ({
@@ -515,7 +602,13 @@ export async function createFromLocal(
   if (fullName !== undefined && !isValidCompanyFullName(fullName)) {
     return bad("state.org.fullName 不是合法公司全称（1~24 字符，中英文、数字、空格与 - . & '，禁 <> 等符号）");
   }
-  const slug = slugFromName(org.name);
+  const slug =
+    typeof slugHint === "string" && slugHint.trim() !== ""
+      ? slugHint.trim().toLowerCase()
+      : slugFromName(org.name);
+  if (typeof slugHint === "string" && slugHint.trim() !== "" && !isValidCompanyName(slug)) {
+    return bad("slug 不是合法公司简称（1~6 位，字母在前、数字在后，且非保留字）", "invalid_slug");
+  }
   if (RESERVED_SLUGS.has(slug)) return bad(`slug ${slug} 是保留路径`, "reserved_slug");
 
   let state: GameState;
@@ -650,6 +743,67 @@ export async function isCompanyMember(slug: string, discordId: string): Promise<
     [slug, discordId],
   );
   return rows.length > 0;
+}
+
+export interface MemberCompany {
+  /** 公司 slug（= 简称小写，companies.id） */
+  slug: string;
+  /** 简称（决定 slug 与菜单显示） */
+  name: string;
+  /** 全称（可选，仅展示；无则 null） */
+  fullName: string | null;
+  /** 该账号绑定的成员位（u1/u2/u3） */
+  memberId: string;
+  /** 是否公司创建者（companies.owner_discord_id 命中） */
+  owner: boolean;
+}
+
+/**
+ * 某 Discord 账号所绑定的公司（`company_members.discord_id` 命中即算）。
+ *
+ * 一个账号只可能绑一家公司（身份只在 import / joinCompany 里写入一次），
+ * 仍按 company_id / member_id 排序取第一条，保证结果确定。
+ * **只读、不结算**：/api/auth/me 是身份探测，不该顺带推进经济状态
+ * （读取即结算只发生在 GET /api/state）。
+ */
+export async function companyForDiscordUser(discordId: string): Promise<MemberCompany | null> {
+  if (typeof discordId !== "string" || discordId.trim() === "") return null;
+  await ensureSchema();
+  const row = await queryOne<{
+    id: string;
+    name: string;
+    state: unknown;
+    member_id: string;
+    owner_discord_id: string | null;
+  }>(
+    `select c.id, c.name, c.state, c.owner_discord_id, m.member_id
+       from company_members m
+       join companies c on c.id = m.company_id
+      where m.discord_id = $1
+      order by m.company_id, m.member_id
+      limit 1`,
+    [discordId],
+  );
+  if (!row) return null;
+
+  let orgName: string | undefined;
+  let orgFull: string | undefined;
+  try {
+    const parsed =
+      typeof row.state === "string" ? (JSON.parse(row.state) as GameState) : (row.state as GameState);
+    orgName = typeof parsed?.org?.name === "string" ? parsed.org.name : undefined;
+    orgFull = normalizeCompanyFullName(parsed?.org?.fullName);
+  } catch {
+    // state 解析失败不影响身份探测：回退 companies 冗余列
+  }
+
+  return {
+    slug: row.id,
+    name: orgName || row.name,
+    fullName: orgFull ?? null,
+    memberId: row.member_id,
+    owner: row.owner_discord_id === discordId,
+  };
 }
 
 export interface OpenGiftResult {

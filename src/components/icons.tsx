@@ -365,6 +365,33 @@ export function IconTrophy(p: IconProps) {
   );
 }
 
+// —— 登入態 / 雲端模式 ——
+export function IconLogIn(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="m10 17 5-5-5-5" />
+      <path d="M15 12H3" />
+      <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
+    </Svg>
+  );
+}
+export function IconLogOut(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="m16 17 5-5-5-5" />
+      <path d="M21 12H9" />
+      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+    </Svg>
+  );
+}
+export function IconCloud(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" />
+    </Svg>
+  );
+}
+
 /** 声望域 → 图标（供 RepBars 等处统一取用） */
 export const REP_ICONS: Record<string, (p: IconProps) => React.ReactElement> = {
   dev: IconTerminal,
